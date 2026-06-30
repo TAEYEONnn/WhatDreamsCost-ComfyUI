@@ -1,29 +1,57 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
+// Mock fetch for API route calls in generation-store
+const mockFetch = vi.fn();
+vi.stubGlobal("fetch", mockFetch);
+
 // Mock Dexie since it needs IndexedDB
 vi.mock("@/lib/db", () => {
   const store: Record<string, unknown[]> = {
-    projects: [], shots: [], assets: [], assetBlobs: [], generations: [],
+    projects: [],
+    shots: [],
+    assets: [],
+    assetBlobs: [],
+    generations: [],
   };
 
   const makeTable = (name: string) => ({
-    add: vi.fn(async (item: { id: string }) => { store[name].push(item); return item.id; }),
-    put: vi.fn(async (item: { id: string }) => {
-      const idx = (store[name] as { id: string }[]).findIndex(x => x.id === item.id);
-      if (idx >= 0) (store[name] as unknown[])[idx] = item; else store[name].push(item);
+    add: vi.fn(async (item: { id: string }) => {
+      store[name].push(item);
       return item.id;
     }),
-    get: vi.fn(async (id: string) => (store[name] as { id: string }[]).find(x => x.id === id)),
+    put: vi.fn(async (item: { id: string }) => {
+      const idx = (store[name] as { id: string }[]).findIndex((x) => x.id === item.id);
+      if (idx >= 0) (store[name] as unknown[])[idx] = item;
+      else store[name].push(item);
+      return item.id;
+    }),
+    get: vi.fn(async (id: string) =>
+      (store[name] as { id: string }[]).find((x) => x.id === id)
+    ),
     update: vi.fn(async (id: string, changes: Record<string, unknown>) => {
-      const idx = (store[name] as { id: string }[]).findIndex(x => x.id === id);
+      const idx = (store[name] as { id: string }[]).findIndex((x) => x.id === id);
       if (idx >= 0) Object.assign((store[name] as Record<string, unknown>[])[idx], changes);
     }),
     delete: vi.fn(async (id: string) => {
-      const idx = (store[name] as { id: string }[]).findIndex(x => x.id === id);
+      const idx = (store[name] as { id: string }[]).findIndex((x) => x.id === id);
       if (idx >= 0) store[name].splice(idx, 1);
     }),
-    orderBy: vi.fn(() => ({ reverse: () => ({ toArray: async () => [...store[name]] }), toArray: async () => [...store[name]] })),
-    where: vi.fn(() => ({ equals: () => ({ toArray: async () => store[name], sortBy: async () => store[name], delete: vi.fn(async () => {}), anyOf: () => ({ toArray: async () => [], delete: vi.fn(async () => {}) }) }), anyOf: () => ({ toArray: async () => [], delete: vi.fn(async () => {}) }) })),
+    orderBy: vi.fn(() => ({
+      reverse: () => ({
+        toArray: async () => [...store[name]],
+      }),
+      toArray: async () => [...store[name]],
+    })),
+    where: vi.fn(() => ({
+      equals: () => ({
+        toArray: async () => store[name],
+        sortBy: async () => store[name],
+        delete: vi.fn(async () => {}),
+        reverse: () => ({ toArray: async () => [...store[name]] }),
+        anyOf: () => ({ toArray: async () => [], delete: vi.fn(async () => {}) }),
+      }),
+      anyOf: () => ({ toArray: async () => [], delete: vi.fn(async () => {}) }),
+    })),
     reverse: vi.fn(() => ({ toArray: async () => [...store[name]] })),
   });
 
@@ -39,9 +67,29 @@ vi.mock("@/lib/db", () => {
   };
 });
 
-// Reset stores between tests
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default fetch mock: provider status endpoint
+  mockFetch.mockImplementation((url: string) => {
+    if (String(url).includes("/api/providers/status")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          providerId: "mock",
+          providerName: "Mock Provider",
+          connected: true,
+          latencyMs: 1,
+        }),
+      });
+    }
+    if (String(url).includes("/api/generations")) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ providerJobId: "mock-job-123" }),
+      });
+    }
+    return Promise.resolve({ ok: false, json: async () => ({ error: "not found" }) });
+  });
 });
 
 describe("Project operations", () => {
@@ -64,7 +112,7 @@ describe("Project operations", () => {
   it("rejects import of invalid project format", async () => {
     const { useProjectStore } = await import("@/lib/store/project-store");
     const store = useProjectStore.getState();
-    await expect(store.importProject('{"foo": "bar"}')).rejects.toThrow("Invalid project export format");
+    await expect(store.importProject('{"foo": "bar"}')).rejects.toThrow();
   });
 });
 
@@ -90,27 +138,37 @@ describe("Asset operations", () => {
     expect(asset.role).toBe("reference");
     expect(asset.name).toBe("test.png");
   });
+
+  it("rejects unsupported mime types", async () => {
+    const { useAssetStore } = await import("@/lib/store/asset-store");
+    const store = useAssetStore.getState();
+    const file = new File(["data"], "doc.pdf", { type: "application/pdf" });
+    await expect(store.uploadAsset("project-1", file)).rejects.toThrow("지원하지 않는");
+  });
 });
 
 describe("Generation operations", () => {
-  it("submits a generation and gets a job id", async () => {
+  it("submits a generation via API and gets a job id", async () => {
     const { useGenerationStore } = await import("@/lib/store/generation-store");
     const store = useGenerationStore.getState();
     const gen = await store.submitGeneration({
       shotId: "shot-1",
+      providerId: "mock",
       modelId: "mock-ltxv-0.9",
       prompt: "Test prompt",
       durationSeconds: 5,
       aspectRatio: "16:9",
     });
     expect(gen.shotId).toBe("shot-1");
-    expect(["queued", "processing", "failed"]).toContain(gen.status);
+    expect(["queued", "failed"]).toContain(gen.status);
   });
 
-  it("provider mock returns connected status", async () => {
+  it("checkProviderStatus updates store state", async () => {
     const { useGenerationStore } = await import("@/lib/store/generation-store");
     const store = useGenerationStore.getState();
-    const status = await store.activeProvider.checkConnection();
-    expect(status.connected).toBe(true);
+    await store.checkProviderStatus();
+    const { providerStatus } = useGenerationStore.getState();
+    expect(providerStatus.connected).toBe(true);
+    expect(providerStatus.checking).toBe(false);
   });
 });

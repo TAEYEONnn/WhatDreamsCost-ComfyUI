@@ -1,16 +1,29 @@
 import type { VideoGenerationInput } from "../types";
 import { NotConfiguredError } from "../types";
 
+export interface WorkflowNodeMapping {
+  promptNodeId: string;
+  promptField: string;
+  seedNodeId?: string;
+  seedField?: string;
+  durationNodeId?: string;
+  durationField?: string;
+  negativePromptNodeId?: string;
+  negativePromptField?: string;
+}
+
 /**
  * Generic ComfyUI workflow adapter.
- * Patches standard widget names found in most ComfyUI video workflows.
+ * Uses explicit WorkflowNodeMapping rather than scanning for field names.
  * For LTX-specific patching see ltx-workflow-adapter.ts.
  */
 export class ComfyUIWorkflowAdapter {
   private workflowJson: Record<string, unknown> | null = null;
+  private mapping: WorkflowNodeMapping | null = null;
 
-  loadWorkflow(json: Record<string, unknown>): void {
+  loadWorkflow(json: Record<string, unknown>, mapping?: WorkflowNodeMapping): void {
     this.workflowJson = json;
+    this.mapping = mapping ?? null;
   }
 
   patchWorkflow(input: VideoGenerationInput): Record<string, unknown> {
@@ -25,28 +38,22 @@ export class ComfyUIWorkflowAdapter {
       JSON.stringify(this.workflowJson)
     ) as Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
 
-    const PROMPT_FIELDS = ["text", "global_prompt", "positive", "prompt"];
-    const SEED_FIELDS = ["seed", "noise_seed"];
+    if (this.mapping) {
+      const m = this.mapping;
+      const setField = (nodeId: string, field: string, value: unknown) => {
+        const node = patched[nodeId];
+        if (node?.inputs) node.inputs[field] = value;
+      };
 
-    for (const node of Object.values(patched)) {
-      if (!node.inputs) continue;
-      const inp = node.inputs;
-
-      for (const field of PROMPT_FIELDS) {
-        if (field in inp && typeof inp[field] === "string") {
-          inp[field] = input.prompt;
-          break;
-        }
+      setField(m.promptNodeId, m.promptField, input.prompt);
+      if (m.negativePromptNodeId && m.negativePromptField && input.negativePrompt !== undefined) {
+        setField(m.negativePromptNodeId, m.negativePromptField, input.negativePrompt);
       }
-
-      for (const field of SEED_FIELDS) {
-        if (field in inp && input.seed !== undefined) {
-          inp[field] = input.seed;
-        }
+      if (m.seedNodeId && m.seedField && input.seed !== undefined) {
+        setField(m.seedNodeId, m.seedField, input.seed);
       }
-
-      if ("width" in inp || "height" in inp) {
-        // Dimensions will be derived from aspect ratio downstream
+      if (m.durationNodeId && m.durationField) {
+        setField(m.durationNodeId, m.durationField, input.durationSeconds);
       }
     }
 

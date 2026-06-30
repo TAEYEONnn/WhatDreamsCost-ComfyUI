@@ -12,11 +12,22 @@ interface AssetState {
   getBlobUrl: (assetId: string) => Promise<string | null>;
 }
 
+const ALLOWED_MIMES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "video/mp4",
+  "video/webm",
+  "audio/mpeg",
+  "audio/wav",
+  "audio/ogg",
+]);
+
 function mimeToKind(mime: string): AssetKind {
   if (mime.startsWith("image/")) return "image";
   if (mime.startsWith("video/")) return "video";
   if (mime.startsWith("audio/")) return "audio";
-  return "image";
+  throw new Error(`지원하지 않는 파일 형식입니다: ${mime}`);
 }
 
 export const useAssetStore = create<AssetState>((set) => ({
@@ -29,6 +40,11 @@ export const useAssetStore = create<AssetState>((set) => ({
   },
 
   uploadAsset: async (projectId, file, role = "reference") => {
+    if (!ALLOWED_MIMES.has(file.type)) {
+      throw new Error(
+        `지원하지 않는 파일 형식입니다. 허용: PNG, JPEG, WebP, MP4, WebM, MP3, WAV, OGG`
+      );
+    }
     const kind = mimeToKind(file.type);
     const asset: Asset = {
       id: uuidv4(),

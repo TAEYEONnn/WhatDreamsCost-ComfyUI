@@ -1,21 +1,23 @@
 import type { VideoGenerationInput } from "../types";
 import { NotConfiguredError } from "../types";
+import type { WorkflowNodeMapping } from "./comfyui-workflow-adapter";
+
+export type { WorkflowNodeMapping };
 
 /**
- * Converts a Local Video Studio Shot into inputs for an LTX-Video workflow.
+ * LTX-Video specific ComfyUI workflow adapter.
+ * Uses explicit WorkflowNodeMapping rather than scanning for field names.
  *
- * The actual workflow JSON must be loaded from
- * vendor/WhatDreamsCost-ComfyUI/example_workflows and exported
- * in ComfyUI's API format before this adapter can produce a full prompt.
- *
- * Until then, patchWorkflow() throws NotConfiguredError so the UI
- * shows a "Workflow setup required" state rather than silently failing.
+ * The workflow JSON must be loaded in ComfyUI API format before patchWorkflow()
+ * can be called. Until then it throws NotConfiguredError.
  */
 export class LtxWorkflowAdapter {
   private workflowJson: Record<string, unknown> | null = null;
+  private mapping: WorkflowNodeMapping | null = null;
 
-  loadWorkflow(json: Record<string, unknown>): void {
+  loadWorkflow(json: Record<string, unknown>, mapping?: WorkflowNodeMapping): void {
     this.workflowJson = json;
+    this.mapping = mapping ?? null;
   }
 
   patchWorkflow(input: VideoGenerationInput): Record<string, unknown> {
@@ -31,20 +33,23 @@ export class LtxWorkflowAdapter {
       JSON.stringify(this.workflowJson)
     ) as Record<string, { inputs?: Record<string, unknown> }>;
 
-    for (const node of Object.values(patched)) {
-      if (!node.inputs) continue;
-      const inp = node.inputs;
+    if (this.mapping) {
+      const m = this.mapping;
+      const setField = (nodeId: string, field: string, value: unknown) => {
+        const node = patched[nodeId];
+        if (node?.inputs) node.inputs[field] = value;
+      };
 
-      // Text-to-video prompt
-      if ("global_prompt" in inp) inp.global_prompt = input.prompt;
-      if ("text" in inp && typeof inp.text === "string") inp.text = input.prompt;
-
-      // Seed
-      if ("seed" in inp && input.seed !== undefined) inp.seed = input.seed;
-
-      // Duration
-      if ("duration_seconds" in inp)
-        inp.duration_seconds = input.durationSeconds;
+      setField(m.promptNodeId, m.promptField, input.prompt);
+      if (m.negativePromptNodeId && m.negativePromptField && input.negativePrompt !== undefined) {
+        setField(m.negativePromptNodeId, m.negativePromptField, input.negativePrompt);
+      }
+      if (m.seedNodeId && m.seedField && input.seed !== undefined) {
+        setField(m.seedNodeId, m.seedField, input.seed);
+      }
+      if (m.durationNodeId && m.durationField) {
+        setField(m.durationNodeId, m.durationField, input.durationSeconds);
+      }
     }
 
     return patched as Record<string, unknown>;

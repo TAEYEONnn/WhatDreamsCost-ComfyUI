@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import type { Project, AspectRatio, Shot, Asset } from "@ltx-studio/shared-types";
+import type { Project, AspectRatio } from "@ltx-studio/shared-types";
+import { ProjectExportSchema } from "@ltx-studio/shared-types";
 import { getDb } from "../db";
 
 interface ProjectState {
@@ -12,7 +13,7 @@ interface ProjectState {
   updateProject: (id: string, changes: Partial<Pick<Project, "name" | "aspectRatio">>) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   setActiveProject: (id: string | null) => void;
-  exportProject: (id: string) => Promise<string>;
+  exportProject: (id: string) => Promise<void>;
   importProject: (json: string) => Promise<Project>;
 }
 
@@ -90,29 +91,103 @@ export const useProjectStore = create<ProjectState>((set) => ({
     const shots = await db.shots.where("projectId").equals(id).toArray();
     const assets = await db.assets.where("projectId").equals(id).toArray();
     const shotIds = shots.map((s) => s.id);
-    const generations = await db.generations.where("shotId").anyOf(shotIds.length ? shotIds : [""]).toArray();
-    return JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), project, shots, assets, generations }, null, 2);
+    const generations = await db.generations
+      .where("shotId")
+      .anyOf(shotIds.length ? shotIds : [""])
+      .toArray();
+
+    const payload = {
+      version: 1 as const,
+      exportedAt: new Date().toISOString(),
+      project,
+      shots,
+      assets,
+      generations,
+    };
+
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const safeName = project.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeName}-${dateStr}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   },
 
   importProject: async (json) => {
-    let data: { project?: Project; shots?: Shot[]; assets?: Asset[] };
+    let raw: unknown;
     try {
-      data = JSON.parse(json);
+      raw = JSON.parse(json);
     } catch {
-      throw new Error("Invalid JSON");
+      throw new Error("잘못된 JSON 형식입니다.");
     }
-    if (!data.project?.id || !data.project?.name) {
-      throw new Error("Invalid project export format");
+
+    const parsed = ProjectExportSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error("프로젝트 내보내기 형식이 올바르지 않습니다.");
     }
+
+    const data = parsed.data;
     const now = new Date().toISOString();
-    const project: Project = { ...data.project, createdAt: now, updatedAt: now };
+
+    const projectId = uuidv4();
+    const shotIdMap = new Map<string, string>(data.shots.map((s) => [s.id, uuidv4()]));
+    const assetIdMap = new Map<string, string>(data.assets.map((a) => [a.id, uuidv4()]));
+    const genIdMap = new Map<string, string>(data.generations.map((g) => [g.id, uuidv4()]));
+
+    const remapAssetId = (id?: string) =>
+      id ? (assetIdMap.get(id) ?? id) : undefined;
+
+    const project: Project = {
+      ...data.project,
+      id: projectId,
+      shotIds: data.project.shotIds.map((id) => shotIdMap.get(id) ?? id),
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const shots = data.shots.map((s) => ({
+      ...s,
+      id: shotIdMap.get(s.id) ?? s.id,
+      projectId,
+      startFrameAssetId: remapAssetId(s.startFrameAssetId),
+      endFrameAssetId: remapAssetId(s.endFrameAssetId),
+      referenceAssetIds: s.referenceAssetIds.map((id) => assetIdMap.get(id) ?? id),
+      selectedGenerationId: s.selectedGenerationId
+        ? (genIdMap.get(s.selectedGenerationId) ?? s.selectedGenerationId)
+        : undefined,
+    }));
+
+    const assets = data.assets.map((a) => ({
+      ...a,
+      id: assetIdMap.get(a.id) ?? a.id,
+      projectId,
+    }));
+
+    const generations = data.generations.map((g) => ({
+      ...g,
+      id: genIdMap.get(g.id) ?? g.id,
+      shotId: shotIdMap.get(g.shotId) ?? g.shotId,
+      parentGenerationId: g.parentGenerationId
+        ? (genIdMap.get(g.parentGenerationId) ?? g.parentGenerationId)
+        : undefined,
+    }));
+
     const db = getDb();
-    await db.transaction("rw", [db.projects, db.shots, db.assets], async () => {
+    await db.transaction("rw", [db.projects, db.shots, db.assets, db.generations], async () => {
       await db.projects.put(project);
-      for (const shot of data.shots ?? []) await db.shots.put(shot);
-      for (const asset of data.assets ?? []) await db.assets.put(asset);
+      for (const shot of shots) await db.shots.put(shot);
+      for (const asset of assets) await db.assets.put(asset);
+      for (const gen of generations) await db.generations.put(gen);
     });
-    set((s) => ({ projects: [project, ...s.projects.filter((p) => p.id !== project.id)], activeProjectId: project.id }));
+
+    set((s) => ({
+      projects: [project, ...s.projects],
+      activeProjectId: project.id,
+    }));
     return project;
   },
 }));

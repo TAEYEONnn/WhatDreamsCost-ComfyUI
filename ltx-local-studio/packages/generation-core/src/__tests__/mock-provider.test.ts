@@ -63,21 +63,20 @@ describe("MockVideoProvider", () => {
     expect(status.status).toBe("cancelled");
   });
 
-  it("simulates failures at 100% failure rate", async () => {
-    vi.useFakeTimers();
+  it("deterministically fails when shouldFail: true", async () => {
     const provider = new MockVideoProvider({
-      failureRate: 100,
-      processingDurationMs: 100,
+      shouldFail: true,
+      processingDurationMs: 50,
     });
 
     const { providerJobId } = await provider.submitGeneration(mockInput);
 
-    // Advance past queued → processing
-    vi.advanceTimersByTime(600);
+    // Wait long enough to move past queued (>500ms) → processing → fail check
+    await new Promise((r) => setTimeout(r, 700));
 
     const status = await provider.getGenerationStatus(providerJobId);
-    expect(["failed", "processing", "completed"]).toContain(status.status);
-    vi.useRealTimers();
+    expect(status.status).toBe("failed");
+    expect(status.errorCode).toMatch(/MOCK/);
   });
 
   it("returns error for unknown job id", async () => {

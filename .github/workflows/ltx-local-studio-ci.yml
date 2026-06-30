@@ -1,0 +1,53 @@
+name: LTX Local Studio CI
+
+on:
+  push:
+    branches:
+      - "claude/ltx-local-studio-setup-0a1dnj"
+      - main
+    paths:
+      - "ltx-local-studio/**"
+      - ".github/workflows/ltx-local-studio-ci.yml"
+  pull_request:
+    paths:
+      - "ltx-local-studio/**"
+      - ".github/workflows/ltx-local-studio-ci.yml"
+
+defaults:
+  run:
+    working-directory: ltx-local-studio
+
+jobs:
+  ci:
+    name: Lint / Typecheck / Test / Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: ltx-local-studio/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm --filter @ltx-studio/shared-types build && pnpm --filter @ltx-studio/generation-core build
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (unit)
+        run: pnpm test
+
+      - name: Build (Next.js)
+        run: pnpm --filter web build

@@ -14,8 +14,7 @@ interface MockJobState {
   failureRate: number;
 }
 
-const MOCK_SAMPLE_OUTPUT =
-  "data:video/mp4;base64,AAAAIGZ0eXBtcDQyAAAAAG1wNDJpc29tAAADiG1vb3Y=";
+const MOCK_SAMPLE_OUTPUT = "/mock/sample-video.mp4";
 
 export class MockVideoProvider implements VideoGenerationProvider {
   readonly id = "mock";
@@ -24,12 +23,18 @@ export class MockVideoProvider implements VideoGenerationProvider {
   private jobs = new Map<string, MockJobState>();
   private failureRate: number;
   private processingDurationMs: number;
+  private shouldFail: boolean;
 
   constructor(
-    options: { failureRate?: number; processingDurationMs?: number } = {}
+    options: {
+      failureRate?: number;
+      processingDurationMs?: number;
+      shouldFail?: boolean;
+    } = {}
   ) {
     this.failureRate = options.failureRate ?? 0.1;
     this.processingDurationMs = options.processingDurationMs ?? 4000;
+    this.shouldFail = options.shouldFail ?? false;
   }
 
   async checkConnection(): Promise<ProviderConnectionStatus> {
@@ -114,8 +119,8 @@ export class MockVideoProvider implements VideoGenerationProvider {
       const rawProgress = Math.min(100, (elapsed / totalMs) * 100);
       job.progress = Math.floor(rawProgress);
 
-      // Random failure
-      if (job.progress > 20 && Math.random() < job.failureRate / 100) {
+      // Deterministic or random failure
+      if (job.progress > 20 && (this.shouldFail || Math.random() < job.failureRate / 100)) {
         job.status = "failed";
         return {
           providerJobId,

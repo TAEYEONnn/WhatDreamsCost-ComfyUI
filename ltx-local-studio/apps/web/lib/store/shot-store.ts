@@ -60,6 +60,16 @@ export const useShotStore = create<ShotState>((set, get) => ({
     };
     const db = getDb();
     await db.shots.add(shot);
+    const project = await db.projects.get(source.projectId);
+    if (project) {
+      const existingIds = project.shotIds?.length
+        ? project.shotIds
+        : shots.map((s) => s.id);
+      await db.projects.update(source.projectId, {
+        shotIds: [...existingIds, shot.id],
+        updatedAt: new Date().toISOString(),
+      });
+    }
     set((s) => ({ shots: [...s.shots, shot], activeShotId: shot.id }));
     return shot;
   },
@@ -73,21 +83,35 @@ export const useShotStore = create<ShotState>((set, get) => ({
   },
 
   deleteShot: async (id) => {
+    const shot = get().shots.find((s) => s.id === id);
     const db = getDb();
     await db.shots.delete(id);
     await db.generations.where("shotId").equals(id).delete();
+    if (shot) {
+      const project = await db.projects.get(shot.projectId);
+      if (project) {
+        await db.projects.update(shot.projectId, {
+          shotIds: (project.shotIds ?? []).filter((sid) => sid !== id),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
     set((s) => {
       const shots = s.shots.filter((sh) => sh.id !== id);
-      return { shots, activeShotId: s.activeShotId === id ? null : s.activeShotId };
+      return { shots, activeShotId: s.activeShotId === id ? (shots[0]?.id ?? null) : s.activeShotId };
     });
   },
 
   reorderShots: async (projectId, orderedIds) => {
     const db = getDb();
-    await db.transaction("rw", db.shots, async () => {
+    await db.transaction("rw", [db.shots, db.projects], async () => {
       for (let i = 0; i < orderedIds.length; i++) {
         await db.shots.update(orderedIds[i], { order: i });
       }
+      await db.projects.update(projectId, {
+        shotIds: orderedIds,
+        updatedAt: new Date().toISOString(),
+      });
     });
     set((s) => ({
       shots: s.shots
