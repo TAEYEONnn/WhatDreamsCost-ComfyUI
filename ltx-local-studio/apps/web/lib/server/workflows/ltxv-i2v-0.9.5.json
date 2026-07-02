@@ -145,7 +145,7 @@
       "height": 512,
       "length": 97,
       "batch_size": 1,
-      "strength": 0.15,
+      "strength": 0.85,
       "positive": [
         "6",
         0

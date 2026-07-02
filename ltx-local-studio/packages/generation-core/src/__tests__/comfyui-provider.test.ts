@@ -56,7 +56,7 @@ const WORKFLOW: Record<string, unknown> = {
   "73": { inputs: { sampler_name: "euler" }, class_type: "KSamplerSelect" },
   "77": {
     inputs: {
-      width: 768, height: 512, length: 97, batch_size: 1, strength: 0.15,
+      width: 768, height: 512, length: 97, batch_size: 1, strength: 0.85,
       positive: ["6", 0], negative: ["7", 0], vae: ["44", 2], image: ["78", 0],
     },
     class_type: "LTXVImgToVideo",
@@ -242,6 +242,29 @@ describe("ComfyUIProvider._patchWorkflow", () => {
     expect(() =>
       provider._patchWorkflow(brokenWorkflow, BASE_INPUT, "img.png")
     ).toThrow("시작 이미지가 적용되지 않았습니다");
+  });
+
+  it("applies default strength 0.85 to node 77 when no i2vStrength in parameters", () => {
+    const result = provider._patchWorkflow(WORKFLOW, BASE_INPUT, "test.png") as Record<string, { inputs: Record<string, unknown> }>;
+    expect(result["77"].inputs.strength).toBe(0.85);
+  });
+
+  it("uses explicit i2vStrength from parameters when provided", () => {
+    const input = { ...BASE_INPUT, parameters: { i2vStrength: 0.7 } };
+    const result = provider._patchWorkflow(WORKFLOW, input, "test.png") as Record<string, { inputs: Record<string, unknown> }>;
+    expect(result["77"].inputs.strength).toBe(0.7);
+  });
+
+  it("clamps i2vStrength below 0.6 to 0.6", () => {
+    const input = { ...BASE_INPUT, parameters: { i2vStrength: 0.1 } };
+    const result = provider._patchWorkflow(WORKFLOW, input, "test.png") as Record<string, { inputs: Record<string, unknown> }>;
+    expect(result["77"].inputs.strength).toBe(0.6);
+  });
+
+  it("clamps i2vStrength above 1.0 to 1.0", () => {
+    const input = { ...BASE_INPUT, parameters: { i2vStrength: 1.5 } };
+    const result = provider._patchWorkflow(WORKFLOW, input, "test.png") as Record<string, { inputs: Record<string, unknown> }>;
+    expect(result["77"].inputs.strength).toBe(1.0);
   });
 });
 

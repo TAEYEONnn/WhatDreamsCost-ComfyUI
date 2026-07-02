@@ -53,6 +53,12 @@ export interface GenerationStatusResult {
   errorCode?: string;
   errorMessage?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Stage transitions the browser has not yet displayed.
+   * Only includes post-sampling stages (decoding / encoding / saving).
+   * The client deduplicates by stage name and shows each for a minimum duration.
+   */
+  pendingStages?: Array<{ stage: GenerationStage; progress: number }>;
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,8 @@ import { useShotStore } from "@/lib/store/shot-store";
 import { useGenerationStore } from "@/lib/store/generation-store";
 import { useAssetStore } from "@/lib/store/asset-store";
 import { CAMERA_PRESETS } from "@ltx-studio/shared-types";
-import type { AspectRatio, GenerationStage } from "@ltx-studio/shared-types";
+import type { AspectRatio } from "@ltx-studio/shared-types";
+import { stageLabel, STAGE_KO } from "@/lib/stage-label";
 
 interface InspectorProps {
   projectId: string | null;
@@ -19,40 +20,19 @@ const STATUS_KO: Record<string, string> = {
   cancelled: "취소됨",
 };
 
-const STAGE_KO: Record<GenerationStage, string> = {
-  uploading: "이미지 업로드 중",
-  queued: "생성 대기 중",
-  preparing: "모델 준비 중",
-  sampling: "영상 프레임 생성 중",
-  decoding: "영상 디코딩 중",
-  encoding: "영상 파일 생성 중",
-  saving: "영상 저장 중",
-  completed: "완료",
-};
-
-/** Fallback stage label when the stage field is not available. */
-function stageLabelFromProgress(progress: number): string {
-  if (progress < 5) return STAGE_KO.uploading;
-  if (progress < 12) return STAGE_KO.queued;
-  if (progress < 15) return STAGE_KO.preparing;
-  if (progress < 93) return STAGE_KO.sampling;
-  if (progress < 96) return STAGE_KO.decoding;
-  if (progress < 98) return STAGE_KO.encoding;
-  if (progress < 100) return STAGE_KO.saving;
-  return STAGE_KO.completed;
-}
-
-function stageLabel(stage: GenerationStage | undefined, progress: number): string {
-  if (stage) return STAGE_KO[stage];
-  return stageLabelFromProgress(progress);
-}
-
 const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 
 export function Inspector({ projectId }: InspectorProps) {
   const { shots, activeShotId, updateShot } = useShotStore();
-  const { generations, loadGenerations, submitGeneration, cancelGeneration, retryGeneration } =
-    useGenerationStore();
+  const {
+    generations,
+    loadGenerations,
+    submitGeneration,
+    cancelGeneration,
+    retryGeneration,
+    stageQueues,
+    dequeueStage,
+  } = useGenerationStore();
   const { uploadAsset, getBlobUrl } = useAssetStore();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
@@ -61,6 +41,7 @@ export function Inspector({ projectId }: InspectorProps) {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const imagePreviewRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const stageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeShot = shots.find((s) => s.id === activeShotId);
 
@@ -92,11 +73,14 @@ export function Inspector({ projectId }: InspectorProps) {
     };
   }, [activeShot?.startFrameAssetId, activeShot?.id, getBlobUrl]);
 
-  // Cleanup object URL on unmount
+  // Cleanup object URL and stage timer on unmount
   useEffect(() => {
     return () => {
       if (imagePreviewRef.current) {
         URL.revokeObjectURL(imagePreviewRef.current);
+      }
+      if (stageTimerRef.current) {
+        clearTimeout(stageTimerRef.current);
       }
     };
   }, []);
@@ -159,6 +143,36 @@ export function Inspector({ projectId }: InspectorProps) {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
+  // ── Stage queue drain (must be before any early return) ───────────────────
+  const shotGenerations = generations.filter((g) => g.shotId === (activeShot?.id ?? ""));
+  const latestGen = shotGenerations[0];
+  const latestGenId = latestGen?.id ?? "";
+  const stageQueue = stageQueues.get(latestGenId) ?? [];
+  const pendingStage = stageQueue[0];
+
+  useEffect(() => {
+    if (!latestGenId || !pendingStage) {
+      if (stageTimerRef.current) {
+        clearTimeout(stageTimerRef.current);
+        stageTimerRef.current = null;
+      }
+      return;
+    }
+    if (!stageTimerRef.current) {
+      stageTimerRef.current = setTimeout(() => {
+        stageTimerRef.current = null;
+        dequeueStage(latestGenId);
+      }, 350);
+    }
+    return () => {
+      if (stageTimerRef.current) {
+        clearTimeout(stageTimerRef.current);
+        stageTimerRef.current = null;
+      }
+    };
+  // Re-run only when the front-of-queue stage changes
+  }, [pendingStage?.stage, latestGenId, dequeueStage]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!projectId || !activeShot) {
     return (
       <div className="flex items-center justify-center h-full text-[#333] text-xs">
@@ -166,9 +180,6 @@ export function Inspector({ projectId }: InspectorProps) {
       </div>
     );
   }
-
-  const shotGenerations = generations.filter((g) => g.shotId === activeShot.id);
-  const latestGen = shotGenerations[0];
 
   const hasStartImage = !!activeShot.startFrameAssetId;
 
@@ -201,6 +212,19 @@ export function Inspector({ projectId }: InspectorProps) {
   };
 
   const isActiveGen = latestGen && ["queued", "processing"].includes(latestGen.status);
+
+  // Show progress bar while actively generating OR while draining pending stages
+  const showProgressSection =
+    isActiveGen ||
+    (stageQueue.length > 0 &&
+      latestGen?.status !== "failed" &&
+      latestGen?.status !== "cancelled");
+
+  // Stage label: when draining the pending queue, show the queued stage directly.
+  // Otherwise use the safety-net–aware stageLabel (progress wins over stale stage).
+  const displayedStageLbl = pendingStage
+    ? STAGE_KO[pendingStage.stage]
+    : stageLabel(latestGen?.stage, latestGen?.progress ?? 0);
 
   return (
     <div className="flex flex-col h-full overflow-y-auto">
@@ -412,7 +436,7 @@ export function Inspector({ projectId }: InspectorProps) {
                 </span>
                 <span className="text-[#444]">{latestGen.progress}%</span>
               </div>
-              {(latestGen.status === "processing" || latestGen.status === "queued") && (
+              {showProgressSection && (
                 <div className="mt-1.5 space-y-1">
                   <div className="w-full h-1 bg-[#1a1a1a] rounded overflow-hidden">
                     <div
@@ -421,7 +445,7 @@ export function Inspector({ projectId }: InspectorProps) {
                     />
                   </div>
                   <div className="text-[10px] text-[#666]">
-                    {stageLabel(latestGen.stage, latestGen.progress)}
+                    {displayedStageLbl}
                   </div>
                 </div>
               )}

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { v4 as uuidv4 } from "uuid";
-import type { Generation, GenerationStatus } from "@ltx-studio/shared-types";
+import type { Generation, GenerationStage, GenerationStatus } from "@ltx-studio/shared-types";
 import { getDb } from "../db";
 
 /**
@@ -42,10 +42,26 @@ interface ProviderStatus {
   checking: boolean;
 }
 
+/** A pending stage waiting to be shown in the UI. */
+export interface PendingStageEntry {
+  stage: GenerationStage;
+  progress: number;
+}
+
 interface GenerationState {
   generations: Generation[];
   providerStatus: ProviderStatus;
   pollingIntervals: Map<string, ReturnType<typeof setInterval>>;
+  /**
+   * In-memory queues of post-sampling stages (decoding/encoding/saving) that
+   * the browser has not yet displayed. Not persisted to IndexedDB.
+   */
+  stageQueues: Map<string, PendingStageEntry[]>;
+  /**
+   * Tracks which stage names have already been enqueued per generationId,
+   * so re-polls don't add the same stage twice.
+   */
+  seenStages: Map<string, Set<GenerationStage>>;
   loadGenerations: (shotId: string) => Promise<void>;
   checkProviderStatus: () => Promise<void>;
   submitGeneration: (
@@ -66,8 +82,11 @@ interface GenerationState {
   cancelGeneration: (generationId: string) => Promise<void>;
   retryGeneration: (generationId: string) => Promise<Generation>;
   adoptGeneration: (generationId: string) => Promise<void>;
+  /** Remove the first entry from the stage queue for a generation. */
+  dequeueStage: (generationId: string) => void;
   _poll: (generationId: string, providerJobId: string) => void;
   _stopPolling: (generationId: string) => void;
+  _clearStageQueue: (generationId: string) => void;
   _updateGeneration: (id: string, changes: Partial<Generation>) => Promise<void>;
 }
 
@@ -80,6 +99,8 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
     checking: true,
   },
   pollingIntervals: new Map(),
+  stageQueues: new Map(),
+  seenStages: new Map(),
 
   loadGenerations: async (shotId) => {
     const db = getDb();
@@ -169,6 +190,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
     const gen = get().generations.find((g) => g.id === generationId);
     if (!gen || !gen.providerJobId) return;
     get()._stopPolling(generationId);
+    get()._clearStageQueue(generationId);
     try {
       await fetch(`/api/generations/${gen.providerJobId}/cancel`, {
         method: "POST",
@@ -210,6 +232,23 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
     });
   },
 
+  dequeueStage: (generationId) => {
+    const q = get().stageQueues.get(generationId);
+    if (!q?.length) return;
+    const [, ...tail] = q;
+    const sq = new Map(get().stageQueues);
+    sq.set(generationId, tail);
+    set({ stageQueues: sq });
+  },
+
+  _clearStageQueue: (generationId) => {
+    const sq = new Map(get().stageQueues);
+    const ss = new Map(get().seenStages);
+    sq.delete(generationId);
+    ss.delete(generationId);
+    set({ stageQueues: sq, seenStages: ss });
+  },
+
   _poll: (generationId, providerJobId) => {
     const interval = setInterval(async () => {
       try {
@@ -222,7 +261,9 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
           outputUrl?: string;
           errorCode?: string;
           errorMessage?: string;
+          pendingStages?: Array<{ stage: string; progress: number }>;
         };
+
         const changes: Partial<Generation> = {
           status: result.status,
           progress: result.progress,
@@ -231,9 +272,38 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
           errorMessage: result.errorMessage,
         };
         if (result.outputUrl) changes.outputUrl = result.outputUrl;
+
+        // Enqueue new post-sampling stage transitions for UI drain.
+        if (result.pendingStages?.length) {
+          const seen = get().seenStages.get(generationId) ?? new Set<GenerationStage>();
+          const newEntries = result.pendingStages.filter(
+            (s) => !seen.has(s.stage as GenerationStage)
+          );
+          if (newEntries.length > 0) {
+            const sq = new Map(get().stageQueues);
+            const existing = sq.get(generationId) ?? [];
+            sq.set(generationId, [
+              ...existing,
+              ...newEntries.map((s) => ({
+                stage: s.stage as GenerationStage,
+                progress: s.progress,
+              })),
+            ]);
+            const ss = new Map(get().seenStages);
+            const updatedSeen = new Set(seen);
+            for (const s of newEntries) updatedSeen.add(s.stage as GenerationStage);
+            ss.set(generationId, updatedSeen);
+            set({ stageQueues: sq, seenStages: ss });
+          }
+        }
+
         if (["completed", "failed", "cancelled"].includes(result.status)) {
           if (result.status === "completed") {
             changes.completedAt = new Date().toISOString();
+          }
+          // Clear queue on failure/cancel; keep queue for completed (drain continues after stop).
+          if (result.status !== "completed") {
+            get()._clearStageQueue(generationId);
           }
           get()._stopPolling(generationId);
         }

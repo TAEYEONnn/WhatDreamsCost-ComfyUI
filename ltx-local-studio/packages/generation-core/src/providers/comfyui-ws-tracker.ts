@@ -20,12 +20,22 @@ export interface WsLike {
 
 export type WsFactory = (url: string) => WsLike;
 
+// ─── Stage transition record — one entry per stage change ─────────────────────
+
+export interface StageTransition {
+  stage: GenerationStage;
+  progress: number;
+  occurredAt: number;
+}
+
 // ─── Progress state stored per promptId ──────────────────────────────────────
 
 export interface ProgressState {
   progress: number;
   stage?: GenerationStage;
   updatedAt: number;
+  /** Ordered history of stage changes — used to surface pendingStages to the browser. */
+  transitions: StageTransition[];
 }
 
 // ─── Node IDs that carry meaningful stage transitions ─────────────────────────
@@ -92,6 +102,8 @@ export class ComfyUIWsTracker {
    * Sets initial progress to 8% / stage "queued".
    */
   registerJob(promptId: string): void {
+    // Initialize with empty transitions so getProgress always returns a defined array.
+    this.progressMap.set(promptId, { progress: 0, updatedAt: Date.now(), transitions: [] });
     this._setProgress(promptId, 8, "queued");
   }
 
@@ -174,7 +186,20 @@ export class ComfyUIWsTracker {
         const promptId = event.data?.prompt_id;
         if (!promptId) break;
 
-        switch (event.data?.node) {
+        const nodeId = event.data?.node;
+
+        if (process.env.NODE_ENV === "development" && nodeId) {
+          const prev = this.progressMap.get(promptId);
+          console.debug("[ComfyUI Progress]", {
+            promptId,
+            eventType: "executing",
+            node: nodeId,
+            currentProgress: prev?.progress ?? 0,
+            currentStage: prev?.stage,
+          });
+        }
+
+        switch (nodeId) {
           case NODE.SAMPLER:
             this._setProgress(promptId, 15, "sampling");
             break;
@@ -225,10 +250,30 @@ export class ComfyUIWsTracker {
     const prev = this.progressMap.get(promptId);
     const next = Math.min(Math.max(pct, 0), 100);
     if (prev && prev.progress >= next) return; // never go backward
+
+    // Append a transition record when the stage changes.
+    const prevTransitions = prev?.transitions ?? [];
+    let transitions = prevTransitions;
+    if (stage && stage !== prev?.stage) {
+      transitions = [
+        ...prevTransitions,
+        { stage, progress: next, occurredAt: Date.now() },
+      ];
+      if (process.env.NODE_ENV === "development") {
+        console.debug("[ComfyUI Progress]", {
+          promptId,
+          eventType: "stage_change",
+          stage,
+          progress: next,
+        });
+      }
+    }
+
     this.progressMap.set(promptId, {
       progress: next,
       stage,
       updatedAt: Date.now(),
+      transitions,
     });
   }
 }

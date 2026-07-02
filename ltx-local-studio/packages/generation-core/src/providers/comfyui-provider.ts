@@ -9,7 +9,11 @@ import type {
 } from "../types";
 import { GenerationError, ProviderConnectionError } from "../types";
 import { ComfyUIWsTracker } from "./comfyui-ws-tracker";
-import type { WsFactory } from "./comfyui-ws-tracker";
+import type { WsFactory, StageTransition } from "./comfyui-ws-tracker";
+import type { GenerationStage } from "@ltx-studio/shared-types";
+
+// Post-sampling stages that are typically too brief for 1 s polling to catch.
+const POST_SAMPLING_STAGES = new Set<GenerationStage>(["decoding", "encoding", "saving"]);
 
 // ─── Node ID constants — must match ltxv-i2v-0.9.5.json ─────────────────────
 const N = {
@@ -312,11 +316,13 @@ export class ComfyUIProvider implements VideoGenerationProvider {
     if (!entry) {
       // Job not yet dequeued — use WebSocket tracker state if available
       const ws = this._tracker.getProgress(providerJobId);
+      const pendingStages = this._buildPendingStages(ws?.transitions);
       return {
         providerJobId,
         status: "queued",
         progress: ws?.progress ?? 8,
         stage: ws?.stage ?? "queued",
+        ...(pendingStages.length ? { pendingStages } : {}),
       };
     }
 
@@ -355,12 +361,24 @@ export class ComfyUIProvider implements VideoGenerationProvider {
 
     // In progress — prefer WebSocket tracker for real granularity
     const ws = this._tracker.getProgress(providerJobId);
+    const pendingStages = this._buildPendingStages(ws?.transitions);
     return {
       providerJobId,
       status: "processing",
       progress: ws?.progress ?? 12,
       stage: ws?.stage ?? "preparing",
+      ...(pendingStages.length ? { pendingStages } : {}),
     };
+  }
+
+  /** Extracts post-sampling stage transitions for the browser to display. */
+  private _buildPendingStages(
+    transitions: StageTransition[] | undefined
+  ): Array<{ stage: GenerationStage; progress: number }> {
+    if (!transitions) return [];
+    return transitions
+      .filter((t) => POST_SAMPLING_STAGES.has(t.stage))
+      .map((t) => ({ stage: t.stage, progress: t.progress }));
   }
 
   async cancelGeneration(providerJobId: string): Promise<void> {
@@ -495,9 +513,15 @@ export class ComfyUIProvider implements VideoGenerationProvider {
     node(N.IMG_TO_VIDEO).height = resolution.height;
     node(N.IMG_TO_VIDEO).length = durationToFrameLength(input.durationSeconds);
 
-    const i2vStrength = input.parameters?.i2vStrength as number | undefined;
-    if (i2vStrength !== undefined) {
-      node(N.IMG_TO_VIDEO).strength = i2vStrength;
+    // Image conditioning strength — default 0.85, clamp to [0.6, 1.0].
+    // ComfyUI computes: mask = 1.0 - strength, so 0.85 allows only 0.15 noise
+    // on the start-frame latent, keeping the original composition intact.
+    const rawStrength = (input.parameters?.i2vStrength as number | undefined) ?? 0.85;
+    const i2vStrength = Math.max(0.6, Math.min(1.0, rawStrength));
+    node(N.IMG_TO_VIDEO).strength = i2vStrength;
+
+    if (process.env.NODE_ENV === "development") {
+      console.debug("[ComfyUI I2V] node77Strength", i2vStrength);
     }
 
     // Node 78 — LoadImage: uploaded filename (never fall back to workflow default)

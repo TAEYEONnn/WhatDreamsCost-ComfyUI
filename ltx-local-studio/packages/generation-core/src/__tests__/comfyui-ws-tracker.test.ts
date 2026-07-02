@@ -348,3 +348,80 @@ describe("ComfyUIWsTracker — stage and progress consistency", () => {
     });
   }
 });
+
+// ─── Stage transition history ─────────────────────────────────────────────────
+
+describe("ComfyUIWsTracker — stage transition history", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("registerJob initialises an empty transitions array", () => {
+    vi.useFakeTimers();
+    const { factory } = makeSingleFactory();
+    const tracker = new ComfyUIWsTracker("http://localhost:8188", "t", factory);
+    tracker.start();
+    tracker.registerJob("tr-1");
+    // After registerJob there should be a queued transition
+    const transitions = tracker.getProgress("tr-1")?.transitions ?? [];
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0].stage).toBe("queued");
+    tracker.stop();
+  });
+
+  it("records a transition each time the stage changes", () => {
+    vi.useFakeTimers();
+    const { factory, ws } = makeSingleFactory();
+    const tracker = new ComfyUIWsTracker("http://localhost:8188", "t", factory);
+    tracker.start();
+    tracker.registerJob("tr-2");
+
+    ws.simulateMessage({ type: "executing", data: { prompt_id: "tr-2", node: "72" } }); // sampling
+    ws.simulateMessage({ type: "executing", data: { prompt_id: "tr-2", node: "8"  } }); // decoding
+    ws.simulateMessage({ type: "executing", data: { prompt_id: "tr-2", node: "80" } }); // encoding
+    ws.simulateMessage({ type: "executing", data: { prompt_id: "tr-2", node: "81" } }); // saving
+
+    const transitions = tracker.getProgress("tr-2")?.transitions ?? [];
+    const stages = transitions.map(t => t.stage);
+    expect(stages).toContain("sampling");
+    expect(stages).toContain("decoding");
+    expect(stages).toContain("encoding");
+    expect(stages).toContain("saving");
+    // Each stage appears exactly once
+    expect(stages.filter(s => s === "decoding")).toHaveLength(1);
+    tracker.stop();
+  });
+
+  it("repeated progress events within same stage do NOT add duplicate transitions", () => {
+    vi.useFakeTimers();
+    const { factory, ws } = makeSingleFactory();
+    const tracker = new ComfyUIWsTracker("http://localhost:8188", "t", factory);
+    tracker.start();
+    tracker.registerJob("tr-3");
+
+    ws.simulateMessage({ type: "progress", data: { prompt_id: "tr-3", node: "72", value: 5,  max: 30 } });
+    ws.simulateMessage({ type: "progress", data: { prompt_id: "tr-3", node: "72", value: 10, max: 30 } });
+    ws.simulateMessage({ type: "progress", data: { prompt_id: "tr-3", node: "72", value: 20, max: 30 } });
+
+    const transitions = tracker.getProgress("tr-3")?.transitions ?? [];
+    expect(transitions.filter(t => t.stage === "sampling")).toHaveLength(1);
+    tracker.stop();
+  });
+
+  it("post-sampling transitions have correct progress values", () => {
+    vi.useFakeTimers();
+    const { factory, ws } = makeSingleFactory();
+    const tracker = new ComfyUIWsTracker("http://localhost:8188", "t", factory);
+    tracker.start();
+    tracker.registerJob("tr-4");
+
+    ws.simulateMessage({ type: "executing", data: { prompt_id: "tr-4", node: "8"  } }); // decoding=93
+    ws.simulateMessage({ type: "executing", data: { prompt_id: "tr-4", node: "80" } }); // encoding=96
+    ws.simulateMessage({ type: "executing", data: { prompt_id: "tr-4", node: "81" } }); // saving=98
+
+    const transitions = tracker.getProgress("tr-4")?.transitions ?? [];
+    const byStage = Object.fromEntries(transitions.map(t => [t.stage, t.progress]));
+    expect(byStage["decoding"]).toBe(93);
+    expect(byStage["encoding"]).toBe(96);
+    expect(byStage["saving"]).toBe(98);
+    tracker.stop();
+  });
+});
