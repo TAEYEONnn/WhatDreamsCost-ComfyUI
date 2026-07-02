@@ -2,13 +2,19 @@ import { createDefaultProvider } from "@ltx-studio/generation-core";
 import type { VideoGenerationProvider } from "@ltx-studio/generation-core";
 import workflowJson from "./workflows/ltxv-i2v-0.9.5.json";
 
-let _provider: VideoGenerationProvider | null = null;
+// Use globalThis so the provider (and its WebSocket tracker) survives
+// Next.js hot-reload in development. Without this, each module re-evaluation
+// would create a new tracker and leave the old one's WS connection open.
+declare global {
+  // eslint-disable-next-line no-var
+  var __ltx_server_provider__: VideoGenerationProvider | undefined;
+}
 
 export function getServerProvider(): VideoGenerationProvider {
-  if (!_provider) {
-    _provider = createDefaultProvider({
+  if (!globalThis.__ltx_server_provider__) {
+    globalThis.__ltx_server_provider__ = createDefaultProvider({
       workflowJson: workflowJson as Record<string, unknown>,
     });
   }
-  return _provider;
+  return globalThis.__ltx_server_provider__;
 }

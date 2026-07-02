@@ -19,6 +19,16 @@ const STATUS_KO: Record<string, string> = {
   cancelled: "취소됨",
 };
 
+/** Maps a 0-100 progress value to a Korean stage label. */
+function stageLabel(progress: number): string {
+  if (progress <= 8) return "생성대기중";
+  if (progress <= 12) return "모델준비중";
+  if (progress <= 90) return "영상프레임생성중";
+  if (progress <= 96) return "영상디코딩중";
+  if (progress < 100) return "영상파일저장중";
+  return "완료";
+}
+
 export function Inspector({ projectId }: InspectorProps) {
   const { shots, activeShotId, updateShot } = useShotStore();
   const { generations, loadGenerations, submitGeneration, cancelGeneration, retryGeneration } =
@@ -284,12 +294,17 @@ export function Inspector({ projectId }: InspectorProps) {
                 </span>
                 <span className="text-[#444]">{latestGen.progress}%</span>
               </div>
-              {latestGen.status === "processing" && (
-                <div className="mt-1.5 w-full h-1 bg-[#1a1a1a] rounded overflow-hidden">
-                  <div
-                    className="h-full bg-blue-600 rounded transition-all"
-                    style={{ width: `${latestGen.progress}%` }}
-                  />
+              {(latestGen.status === "processing" || latestGen.status === "queued") && (
+                <div className="mt-1.5 space-y-1">
+                  <div className="w-full h-1 bg-[#1a1a1a] rounded overflow-hidden">
+                    <div
+                      className="h-full bg-blue-600 rounded transition-[width] duration-300 ease-out"
+                      style={{ width: `${latestGen.progress}%` }}
+                    />
+                  </div>
+                  <div className="text-[10px] text-[#555]">
+                    {stageLabel(latestGen.progress)}
+                  </div>
                 </div>
               )}
               {latestGen.errorMessage && (

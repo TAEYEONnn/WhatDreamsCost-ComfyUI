@@ -7,6 +7,8 @@ import type {
   ModelCapabilities,
 } from "../types";
 import { GenerationError, ProviderConnectionError } from "../types";
+import { ComfyUIWsTracker } from "./comfyui-ws-tracker";
+import type { WsFactory } from "./comfyui-ws-tracker";
 
 // ─── Node ID constants — must match ltxv-i2v-0.9.5.json ─────────────────────
 const N = {
@@ -73,24 +75,59 @@ export interface ComfyUIConfig {
   clientId?: string;
   /** Next.js proxy route path that hides the ComfyUI origin from browsers. */
   videoProxyPath?: string;
+  /** Override the WebSocket factory (inject a mock in tests). */
+  wsFactory?: WsFactory;
 }
 
 type WorkflowNode = { inputs?: Record<string, unknown> };
 type WorkflowGraph = Record<string, WorkflowNode>;
 
+/** A single file entry in a ComfyUI history node output. */
+interface ComfyOutputFile {
+  filename: string;
+  subfolder: string;
+  type: string;
+}
+
+/**
+ * A single node's output in the history response.
+ *
+ * ComfyUI's SaveVideo serialises the result as `images` (not `videos`),
+ * even for .mp4 files.  PreviewVideo / older nodes may use `videos`.
+ * Both fields must be checked; the file extension determines whether it
+ * is actually a video.
+ */
+interface ComfyNodeOutput {
+  videos?: ComfyOutputFile[];
+  images?: ComfyOutputFile[];
+  animated?: boolean[];
+}
+
 type HistoryEntry = {
   status?: { status_str?: string; completed?: boolean };
-  outputs?: Record<
-    string,
-    {
-      videos?: Array<{ filename: string; subfolder: string; type: string }>;
-    }
-  >;
+  outputs?: Record<string, ComfyNodeOutput>;
   execution_error?: {
     exception_message?: string;
     exception_type?: string;
   };
 };
+
+const VIDEO_EXTENSIONS = new Set([".mp4", ".webm", ".mov", ".mkv"]);
+
+function hasVideoExtension(filename: string): boolean {
+  const dot = filename.lastIndexOf(".");
+  if (dot === -1) return false;
+  return VIDEO_EXTENSIONS.has(filename.slice(dot).toLowerCase());
+}
+
+/**
+ * Returns the first file from `videos` or `images` that has a video
+ * extension, or undefined if none is found.
+ */
+function pickVideoFile(node: ComfyNodeOutput): ComfyOutputFile | undefined {
+  const candidates = [...(node.videos ?? []), ...(node.images ?? [])];
+  return candidates.find((f) => hasVideoExtension(f.filename));
+}
 
 export class ComfyUIProvider implements VideoGenerationProvider {
   readonly id = "comfyui";
@@ -100,6 +137,7 @@ export class ComfyUIProvider implements VideoGenerationProvider {
   private readonly clientId: string;
   private readonly workflowJson: Record<string, unknown> | undefined;
   private readonly videoProxyPath: string;
+  private readonly _tracker: ComfyUIWsTracker;
 
   constructor(config: ComfyUIConfig) {
     this.baseUrl = config.baseUrl;
@@ -108,6 +146,12 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       `ltx-studio-${Math.random().toString(36).slice(2, 10)}`;
     this.workflowJson = config.workflowJson;
     this.videoProxyPath = config.videoProxyPath ?? "/api/comfyui-proxy/video";
+    this._tracker = new ComfyUIWsTracker(
+      this.baseUrl,
+      this.clientId,
+      config.wsFactory
+    );
+    this._tracker.start();
   }
 
   async checkConnection(): Promise<ProviderConnectionStatus> {
@@ -217,6 +261,9 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       );
     }
 
+    // Register the job with the tracker so WebSocket events are tracked from now on.
+    this._tracker.registerJob(data.prompt_id);
+
     return { providerJobId: data.prompt_id };
   }
 
@@ -255,7 +302,13 @@ export class ComfyUIProvider implements VideoGenerationProvider {
     const entry = history[providerJobId];
 
     if (!entry) {
-      return { providerJobId, status: "queued", progress: 0 };
+      // Job not yet dequeued — use WebSocket tracker state if available
+      const ws = this._tracker.getProgress(providerJobId);
+      return {
+        providerJobId,
+        status: "queued",
+        progress: ws?.progress ?? 8,
+      };
     }
 
     if (entry.execution_error) {
@@ -276,6 +329,7 @@ export class ComfyUIProvider implements VideoGenerationProvider {
     }
 
     if (completed) {
+      this._tracker.markCompleted(providerJobId);
       const outputUrl = this._extractOutputUrl(entry.outputs ?? {});
       if (!outputUrl) {
         return {
@@ -289,7 +343,13 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       return { providerJobId, status: "completed", progress: 100, outputUrl };
     }
 
-    return { providerJobId, status: "processing", progress: 50 };
+    // In progress — prefer WebSocket tracker for real granularity
+    const ws = this._tracker.getProgress(providerJobId);
+    return {
+      providerJobId,
+      status: "processing",
+      progress: ws?.progress ?? 12,
+    };
   }
 
   async cancelGeneration(providerJobId: string): Promise<void> {
@@ -421,22 +481,23 @@ export class ComfyUIProvider implements VideoGenerationProvider {
   }
 
   private _extractOutputUrl(
-    outputs: Record<
-      string,
-      { videos?: Array<{ filename: string; subfolder: string; type: string }> }
-    >
+    outputs: Record<string, ComfyNodeOutput>
   ): string | undefined {
-    // Look at SaveVideo node (81) first
+    // Check SaveVideo node (81) first — preferred output
     const saveNode = outputs[N.SAVE_VIDEO];
-    if (saveNode?.videos?.length) {
-      return this._buildProxyUrl(saveNode.videos[0]);
+    if (saveNode) {
+      const file = pickVideoFile(saveNode);
+      if (file) return this._buildProxyUrl(file);
     }
-    // Fallback: search all output nodes
+
+    // Fallback: search all output nodes for any video file.
+    // ComfyUI SaveVideo puts .mp4 results in `images`, not `videos`,
+    // so we check both fields via pickVideoFile.
     for (const node of Object.values(outputs)) {
-      if (node.videos?.length) {
-        return this._buildProxyUrl(node.videos[0]);
-      }
+      const file = pickVideoFile(node);
+      if (file) return this._buildProxyUrl(file);
     }
+
     return undefined;
   }
 

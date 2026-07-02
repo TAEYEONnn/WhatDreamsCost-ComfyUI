@@ -4,9 +4,37 @@
  * These tests mock the global `fetch` so no real ComfyUI server is needed.
  * Integration tests that require a live server are intentionally excluded here.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { ComfyUIProvider, durationToFrameLength } from "../providers/comfyui-provider";
+import type { ComfyUIConfig } from "../providers/comfyui-provider";
+import type { WsLike, WsFactory } from "../providers/comfyui-ws-tracker";
 import type { VideoGenerationInput } from "../types";
+
+// Prevent tracker reconnect timers from keeping the test process alive.
+// All provider tests use a no-op WS factory that never connects.
+beforeAll(() => { vi.useFakeTimers(); });
+afterAll(() => { vi.useRealTimers(); });
+
+// No-op WebSocket factory — satisfies WsFactory without any real connection.
+const NO_OP_WS: WsFactory = (_url: string): WsLike => {
+  const ws: WsLike = {
+    on: () => ws,
+    close: () => {},
+  };
+  return ws;
+};
+
+/** Convenience: creates a ComfyUIProvider with a no-op WS factory so tests
+ *  don't create dangling reconnect timers. */
+function makeProvider(extra?: Partial<ComfyUIConfig>): ComfyUIProvider {
+  return new ComfyUIProvider({
+    baseUrl: "http://localhost:8188",
+    workflowJson: WORKFLOW,
+    videoProxyPath: "/api/comfyui-proxy/video",
+    wsFactory: NO_OP_WS,
+    ...extra,
+  });
+}
 
 // ─── Minimal workflow fixture matching ltxv-i2v-0.9.5.json node IDs ──────────
 const WORKFLOW: Record<string, unknown> = {
@@ -136,10 +164,7 @@ describe("durationToFrameLength", () => {
 // ─── _patchWorkflow ───────────────────────────────────────────────────────────
 
 describe("ComfyUIProvider._patchWorkflow", () => {
-  const provider = new ComfyUIProvider({
-    baseUrl: "http://localhost:8188",
-    workflowJson: WORKFLOW,
-  });
+  const provider = makeProvider();
 
   it("writes positive prompt to node 6, not node 7", () => {
     const result = provider._patchWorkflow(WORKFLOW, BASE_INPUT, "test.png") as Record<string, { inputs: Record<string, unknown> }>;
@@ -228,10 +253,7 @@ describe("ComfyUIProvider.submitGeneration", () => {
   it("returns providerJobId from ComfyUI /prompt response", async () => {
     globalThis.fetch = buildFetchMock({ promptResponse: { prompt_id: "abc-999" } }) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     const result = await provider.submitGeneration(BASE_INPUT);
     expect(result.providerJobId).toBe("abc-999");
   });
@@ -239,10 +261,7 @@ describe("ComfyUIProvider.submitGeneration", () => {
   it("throws IMAGE_REQUIRED when startFrameData is missing", async () => {
     globalThis.fetch = buildFetchMock({}) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     await expect(
       provider.submitGeneration({ ...BASE_INPUT, startFrameData: undefined })
     ).rejects.toThrow("이미지-투-비디오 요청에는 시작 이미지가 필요합니다");
@@ -251,10 +270,7 @@ describe("ComfyUIProvider.submitGeneration", () => {
   it("throws ProviderConnectionError when ComfyUI server is down", async () => {
     globalThis.fetch = buildFetchMock({ systemStats: false }) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     await expect(provider.submitGeneration(BASE_INPUT)).rejects.toThrow(
       "ComfyUI 서버에 연결할 수 없습니다"
     );
@@ -280,10 +296,7 @@ describe("ComfyUIProvider.submitGeneration", () => {
       }
     ) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     await provider.submitGeneration({
       ...BASE_INPUT,
       prompt: "POSITIVE_TEXT",
@@ -317,10 +330,7 @@ describe("ComfyUIProvider.submitGeneration", () => {
       }
     ) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     await provider.submitGeneration(BASE_INPUT);
 
     const wf = capturedBody!.prompt as Record<string, { inputs: Record<string, unknown> }>;
@@ -330,10 +340,7 @@ describe("ComfyUIProvider.submitGeneration", () => {
   it("throws BLOB_URL_NOT_SUPPORTED for blob: URLs", async () => {
     globalThis.fetch = buildFetchMock({}) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     await expect(
       provider.submitGeneration({
         ...BASE_INPUT,
@@ -350,10 +357,7 @@ describe("ComfyUIProvider.submitGeneration", () => {
       },
     }) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     await expect(provider.submitGeneration(BASE_INPUT)).rejects.toThrow(
       "워크플로 검증에 실패했습니다"
     );
@@ -377,13 +381,10 @@ describe("ComfyUIProvider.getGenerationStatus", () => {
   it("returns queued when job is not in history yet", async () => {
     globalThis.fetch = buildFetchMock({ historyResponse: {} }) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     const status = await provider.getGenerationStatus("missing-id");
     expect(status.status).toBe("queued");
-    expect(status.progress).toBe(0);
+    expect(status.progress).toBe(8); // default: job registered in queue
   });
 
   it("extracts video URL from node 81 outputs on completion", async () => {
@@ -402,11 +403,7 @@ describe("ComfyUIProvider.getGenerationStatus", () => {
 
     globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-      videoProxyPath: "/api/comfyui-proxy/video",
-    });
+    const provider = makeProvider();
     const status = await provider.getGenerationStatus("prompt-xyz");
 
     expect(status.status).toBe("completed");
@@ -426,10 +423,7 @@ describe("ComfyUIProvider.getGenerationStatus", () => {
 
     globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     const status = await provider.getGenerationStatus("prompt-xyz");
 
     expect(status.status).toBe("failed");
@@ -449,10 +443,7 @@ describe("ComfyUIProvider.getGenerationStatus", () => {
 
     globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     const status = await provider.getGenerationStatus("prompt-xyz");
 
     expect(status.status).toBe("failed");
@@ -463,15 +454,153 @@ describe("ComfyUIProvider.getGenerationStatus", () => {
   it("returns COMFYUI_SERVER_DOWN when fetch throws", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     const status = await provider.getGenerationStatus("any-id");
 
     expect(status.status).toBe("failed");
     expect(status.errorCode).toBe("COMFYUI_SERVER_DOWN");
     expect(status.errorMessage).toContain("ComfyUI 서버");
+  });
+
+  // ── video extraction via images[] field (ComfyUI SaveVideo serialisation) ──
+
+  it("extracts video URL from outputs[node].videos (legacy)", async () => {
+    const historyResponse = {
+      "p-videos": {
+        status: { status_str: "success", completed: true },
+        outputs: {
+          "81": {
+            videos: [
+              { filename: "clip.mp4", subfolder: "video/ltx-studio", type: "output" },
+            ],
+          },
+        },
+      },
+    };
+    globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
+
+    const provider = makeProvider();
+    const status = await provider.getGenerationStatus("p-videos");
+
+    expect(status.status).toBe("completed");
+    expect(status.outputUrl).toContain("/api/comfyui-proxy/video");
+    expect(status.outputUrl).toContain("filename=clip.mp4");
+  });
+
+  it("extracts video URL from outputs[node].images when file is .mp4", async () => {
+    const historyResponse = {
+      "p-images-mp4": {
+        status: { status_str: "success", completed: true },
+        outputs: {
+          "81": {
+            images: [
+              {
+                filename: "ltx-studio_gen-abc_00001.mp4",
+                subfolder: "video/ltx-studio",
+                type: "output",
+              },
+            ],
+            animated: [true],
+          },
+        },
+      },
+    };
+    globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
+
+    const provider = makeProvider();
+    const status = await provider.getGenerationStatus("p-images-mp4");
+
+    expect(status.status).toBe("completed");
+    expect(status.outputUrl).toContain("filename=ltx-studio_gen-abc_00001.mp4");
+    expect(status.outputUrl).not.toContain("localhost:8188");
+  });
+
+  it("skips .png entries in images[] and picks .mp4", async () => {
+    const historyResponse = {
+      "p-mixed": {
+        status: { status_str: "success", completed: true },
+        outputs: {
+          "81": {
+            images: [
+              { filename: "preview.png", subfolder: "", type: "temp" },
+              { filename: "result.mp4", subfolder: "video/ltx-studio", type: "output" },
+            ],
+          },
+        },
+      },
+    };
+    globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
+
+    const provider = makeProvider();
+    const status = await provider.getGenerationStatus("p-mixed");
+
+    expect(status.status).toBe("completed");
+    expect(status.outputUrl).toContain("filename=result.mp4");
+    expect(status.outputUrl).not.toContain("preview.png");
+  });
+
+  it("returns OUTPUT_NOT_FOUND when all files in images[] are non-video", async () => {
+    const historyResponse = {
+      "p-only-png": {
+        status: { status_str: "success", completed: true },
+        outputs: {
+          "81": {
+            images: [
+              { filename: "frame.png", subfolder: "", type: "temp" },
+            ],
+          },
+        },
+      },
+    };
+    globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
+
+    const provider = makeProvider();
+    const status = await provider.getGenerationStatus("p-only-png");
+
+    expect(status.status).toBe("failed");
+    expect(status.errorCode).toBe("OUTPUT_NOT_FOUND");
+  });
+
+  it("returns OUTPUT_NOT_FOUND when no video files found anywhere", async () => {
+    const historyResponse = {
+      "p-empty": {
+        status: { status_str: "success", completed: true },
+        outputs: { "81": {} },
+      },
+    };
+    globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
+
+    const provider = makeProvider();
+    const status = await provider.getGenerationStatus("p-empty");
+
+    expect(status.status).toBe("failed");
+    expect(status.errorCode).toBe("OUTPUT_NOT_FOUND");
+  });
+
+  it("encodes subfolder and filename correctly in proxy URL", async () => {
+    const historyResponse = {
+      "p-encode": {
+        status: { status_str: "success", completed: true },
+        outputs: {
+          "81": {
+            images: [
+              {
+                filename: "ltx studio gen 00001.mp4",
+                subfolder: "video/ltx studio",
+                type: "output",
+              },
+            ],
+          },
+        },
+      },
+    };
+    globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
+
+    const provider = makeProvider();
+    const status = await provider.getGenerationStatus("p-encode");
+
+    expect(status.outputUrl).toContain("filename=ltx+studio+gen+00001.mp4");
+    expect(status.outputUrl).toContain("subfolder=video%2Fltx+studio");
   });
 });
 
@@ -491,10 +620,7 @@ describe("ComfyUIProvider.cancelGeneration", () => {
       }
     ) as typeof fetch;
 
-    const provider = new ComfyUIProvider({
-      baseUrl: "http://localhost:8188",
-      workflowJson: WORKFLOW,
-    });
+    const provider = makeProvider();
     await provider.cancelGeneration("job-to-cancel");
 
     const queueCall = calls.find((c) => c.url.endsWith("/queue"));

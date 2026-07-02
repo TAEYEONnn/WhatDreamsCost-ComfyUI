@@ -2,6 +2,7 @@ export * from "./types";
 export { MockVideoProvider } from "./providers/mock-provider";
 export { ComfyUIProvider, durationToFrameLength } from "./providers/comfyui-provider";
 export type { ComfyUIConfig } from "./providers/comfyui-provider";
+export type { WsFactory, WsLike, ProgressState } from "./providers/comfyui-ws-tracker";
 export { NvidiaBuildProvider } from "./providers/nvidia-build-provider";
 export { LtxWorkflowAdapter, ltxWorkflowAdapter } from "./adapters/ltx-workflow-adapter";
 export { ComfyUIWorkflowAdapter, comfyUIWorkflowAdapter } from "./adapters/comfyui-workflow-adapter";

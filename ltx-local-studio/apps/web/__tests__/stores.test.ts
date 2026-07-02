@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // Mock fetch for API route calls in generation-store
 const mockFetch = vi.fn();
@@ -277,5 +277,94 @@ describe("Generation — startFrameData resolution", () => {
 
     // Video blob should NOT be promoted to startFrameData
     expect(captured.body?.startFrameData).toBeUndefined();
+  });
+});
+
+describe("Generation — polling lifecycle", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it("starts polling after successful submitGeneration", async () => {
+    let statusCallCount = 0;
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/api/providers/status")) {
+        return { ok: true, json: async () => ({ providerId: "comfyui", providerName: "ComfyUI", connected: true }) };
+      }
+      if (u.includes("/api/generations") && opts?.method === "POST") {
+        return { ok: true, json: async () => ({ providerJobId: "poll-job-1" }) };
+      }
+      if (u.includes("/api/generations/poll-job-1")) {
+        statusCallCount++;
+        return {
+          ok: true,
+          json: async () => ({ status: "processing", progress: 50 }),
+        };
+      }
+      return { ok: false, json: async () => ({ error: "not found" }) };
+    });
+
+    const { useGenerationStore } = await import("@/lib/store/generation-store");
+    await useGenerationStore.getState().submitGeneration({
+      shotId: "shot-poll-1",
+      providerId: "comfyui",
+      modelId: "ltxv-0.9.5",
+      prompt: "polling test",
+      durationSeconds: 4,
+      aspectRatio: "16:9",
+    });
+
+    // Advance past first poll interval (1000 ms)
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(statusCallCount).toBeGreaterThanOrEqual(1);
+
+    // Stop all polling to clean up
+    const state = useGenerationStore.getState();
+    state.pollingIntervals.forEach((_, id) => state._stopPolling(id));
+  });
+
+  it("stops polling when generation status becomes completed", async () => {
+    let callCount = 0;
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/api/providers/status")) {
+        return { ok: true, json: async () => ({ providerId: "comfyui", connected: true }) };
+      }
+      if (u.includes("/api/generations") && opts?.method === "POST") {
+        return { ok: true, json: async () => ({ providerJobId: "poll-job-2" }) };
+      }
+      if (u.includes("/api/generations/poll-job-2")) {
+        callCount++;
+        return {
+          ok: true,
+          json: async () => ({ status: "completed", progress: 100, outputUrl: "/api/comfyui-proxy/video?filename=out.mp4" }),
+        };
+      }
+      return { ok: false, json: async () => ({ error: "not found" }) };
+    });
+
+    const { useGenerationStore } = await import("@/lib/store/generation-store");
+    await useGenerationStore.getState().submitGeneration({
+      shotId: "shot-poll-2",
+      providerId: "comfyui",
+      modelId: "ltxv-0.9.5",
+      prompt: "completion test",
+      durationSeconds: 4,
+      aspectRatio: "16:9",
+    });
+
+    // First poll — completes
+    await vi.advanceTimersByTimeAsync(1_100);
+    const firstCallCount = callCount;
+
+    // Advance further — should not poll again since completed
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(callCount).toBe(firstCallCount); // no more calls after completion
   });
 });

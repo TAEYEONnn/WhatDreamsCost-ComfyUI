@@ -19,9 +19,11 @@
   },
   "dependencies": {
     "@ltx-studio/shared-types": "workspace:*",
+    "ws": "^8.18.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/ws": "^8.5.13",
     "typescript": "^5.4.5",
     "vitest": "^1.6.0"
   }
