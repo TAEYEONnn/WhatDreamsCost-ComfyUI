@@ -1,4 +1,4 @@
-import type { AspectRatio } from "@ltx-studio/shared-types";
+import type { AspectRatio, GenerationStage } from "@ltx-studio/shared-types";
 
 // ---------------------------------------------------------------------------
 // Provider connection / capability types
@@ -48,6 +48,7 @@ export interface GenerationStatusResult {
   providerJobId: string;
   status: "queued" | "processing" | "completed" | "failed" | "cancelled";
   progress: number;
+  stage?: GenerationStage;
   outputUrl?: string;
   errorCode?: string;
   errorMessage?: string;

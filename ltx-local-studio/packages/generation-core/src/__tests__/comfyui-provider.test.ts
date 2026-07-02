@@ -310,6 +310,37 @@ describe("ComfyUIProvider.submitGeneration", () => {
     expect(wf["7"].inputs.text).not.toBe("POSITIVE_TEXT");
   });
 
+  it("uses a UUID-based unique filename for each upload", async () => {
+    const uploadedFilenames: string[] = [];
+
+    globalThis.fetch = vi.fn().mockImplementation(
+      async (url: string, opts?: RequestInit) => {
+        const u = url as string;
+        if (u.endsWith("/system_stats")) {
+          return { ok: true, json: async () => ({ system: {} }) };
+        }
+        if (u.includes("/upload/image")) {
+          const form = opts?.body as FormData;
+          const file = form.get("image") as File;
+          uploadedFilenames.push(file.name);
+          return { ok: true, json: async () => ({ name: "out.png", subfolder: "" }) };
+        }
+        if (u.endsWith("/prompt")) {
+          return { ok: true, json: async () => ({ prompt_id: "ok-uuid" }) };
+        }
+        throw new Error(`Unexpected: ${u}`);
+      }
+    ) as typeof fetch;
+
+    const provider = makeProvider();
+    await provider.submitGeneration(BASE_INPUT);
+    await provider.submitGeneration({ ...BASE_INPUT, generationId: "gen-xyz" });
+
+    expect(uploadedFilenames).toHaveLength(2);
+    expect(uploadedFilenames[0]).not.toBe(uploadedFilenames[1]); // unique per request
+    expect(uploadedFilenames[0]).toMatch(/^ltx-studio\/[0-9a-f-]{36}\.png$/);
+  });
+
   it("combines subfolder and name for node 78 when subfolder is non-empty", async () => {
     let capturedBody: Record<string, unknown> | undefined;
 
@@ -385,6 +416,22 @@ describe("ComfyUIProvider.getGenerationStatus", () => {
     const status = await provider.getGenerationStatus("missing-id");
     expect(status.status).toBe("queued");
     expect(status.progress).toBe(8); // default: job registered in queue
+    expect(status.stage).toBe("queued");
+  });
+
+  it("returns processing with stage 'preparing' when in history but not completed", async () => {
+    const historyResponse = {
+      "prompt-in-progress": {
+        status: { status_str: "running", completed: false },
+        outputs: {},
+      },
+    };
+    globalThis.fetch = buildFetchMock({ historyResponse }) as typeof fetch;
+
+    const provider = makeProvider();
+    const status = await provider.getGenerationStatus("prompt-in-progress");
+    expect(status.status).toBe("processing");
+    expect(status.stage).toBe("preparing"); // default when no WS data
   });
 
   it("extracts video URL from node 81 outputs on completion", async () => {
@@ -408,6 +455,7 @@ describe("ComfyUIProvider.getGenerationStatus", () => {
 
     expect(status.status).toBe("completed");
     expect(status.progress).toBe(100);
+    expect(status.stage).toBe("completed");
     expect(status.outputUrl).toContain("/api/comfyui-proxy/video");
     expect(status.outputUrl).toContain("filename=ltx-studio_gen-abc_00001.mp4");
     expect(status.outputUrl).not.toContain("localhost:8188");

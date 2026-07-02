@@ -4,7 +4,7 @@ import { useShotStore } from "@/lib/store/shot-store";
 import { useGenerationStore } from "@/lib/store/generation-store";
 import { useAssetStore } from "@/lib/store/asset-store";
 import { CAMERA_PRESETS } from "@ltx-studio/shared-types";
-import type { AspectRatio } from "@ltx-studio/shared-types";
+import type { AspectRatio, GenerationStage } from "@ltx-studio/shared-types";
 
 interface InspectorProps {
   projectId: string | null;
@@ -19,14 +19,32 @@ const STATUS_KO: Record<string, string> = {
   cancelled: "취소됨",
 };
 
-/** Maps a 0-100 progress value to a Korean stage label. */
-function stageLabel(progress: number): string {
-  if (progress <= 8) return "생성대기중";
-  if (progress <= 12) return "모델준비중";
-  if (progress <= 90) return "영상프레임생성중";
-  if (progress <= 96) return "영상디코딩중";
-  if (progress < 100) return "영상파일저장중";
-  return "완료";
+const STAGE_KO: Record<GenerationStage, string> = {
+  uploading: "이미지 업로드 중",
+  queued: "생성 대기 중",
+  preparing: "모델 준비 중",
+  sampling: "영상 프레임 생성 중",
+  decoding: "영상 디코딩 중",
+  encoding: "영상 파일 생성 중",
+  saving: "영상 저장 중",
+  completed: "완료",
+};
+
+/** Fallback stage label when the stage field is not available. */
+function stageLabelFromProgress(progress: number): string {
+  if (progress < 5) return STAGE_KO.uploading;
+  if (progress < 12) return STAGE_KO.queued;
+  if (progress < 15) return STAGE_KO.preparing;
+  if (progress < 93) return STAGE_KO.sampling;
+  if (progress < 96) return STAGE_KO.decoding;
+  if (progress < 98) return STAGE_KO.encoding;
+  if (progress < 100) return STAGE_KO.saving;
+  return STAGE_KO.completed;
+}
+
+function stageLabel(stage: GenerationStage | undefined, progress: number): string {
+  if (stage) return STAGE_KO[stage];
+  return stageLabelFromProgress(progress);
 }
 
 export function Inspector({ projectId }: InspectorProps) {
@@ -73,7 +91,7 @@ export function Inspector({ projectId }: InspectorProps) {
         cameraPresetId: activeShot.cameraPresetId,
         startFrameAssetId: activeShot.startFrameAssetId,
         endFrameAssetId: activeShot.endFrameAssetId,
-        referenceAssetIds: activeShot.referenceAssetIds,
+        // referenceAssetIds intentionally omitted — LTX 0.9.5 supports one start image only
       });
     } finally {
       setIsSubmitting(false);
@@ -168,75 +186,52 @@ export function Inspector({ projectId }: InspectorProps) {
           </select>
         </div>
 
-        {/* Start / End Frame */}
-        <div className="grid grid-cols-2 gap-2">
-          <div className="space-y-1">
-            <label className="text-[10px] text-[#555] uppercase tracking-wider">시작 프레임</label>
-            <select
-              value={activeShot.startFrameAssetId ?? ""}
-              onChange={(e) =>
-                void updateShot(activeShot.id, {
-                  startFrameAssetId: e.target.value || undefined,
-                })
-              }
-              className="w-full bg-[#111] border border-[#222] rounded px-2 py-1.5 text-xs text-[#ccc] outline-none focus:border-[#333]"
-            >
-              <option value="">없음</option>
-              {imageAssets.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-[#555] uppercase tracking-wider">끝 프레임</label>
-            <select
-              value={activeShot.endFrameAssetId ?? ""}
-              onChange={(e) =>
-                void updateShot(activeShot.id, {
-                  endFrameAssetId: e.target.value || undefined,
-                })
-              }
-              className="w-full bg-[#111] border border-[#222] rounded px-2 py-1.5 text-xs text-[#ccc] outline-none focus:border-[#333]"
-            >
-              <option value="">없음</option>
-              {imageAssets.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          </div>
+        {/* 시작 이미지 — single image only for LTX 0.9.5 */}
+        <div className="space-y-1">
+          <label className="text-[10px] text-[#555] uppercase tracking-wider">시작 이미지</label>
+          <p className="text-[10px] text-[#444]">
+            현재 로컬 LTX 모델은 시작 이미지 1장만 사용할 수 있습니다.
+          </p>
+          <select
+            value={activeShot.startFrameAssetId ?? ""}
+            onChange={(e) =>
+              void updateShot(activeShot.id, {
+                startFrameAssetId: e.target.value || undefined,
+              })
+            }
+            className="w-full bg-[#111] border border-[#222] rounded px-2 py-1.5 text-xs text-[#ccc] outline-none focus:border-[#333]"
+          >
+            <option value="">없음</option>
+            {imageAssets.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+          {imageAssets.length === 0 && (
+            <div className="text-[10px] text-[#444]">에셋 라이브러리에 이미지를 추가하세요</div>
+          )}
         </div>
 
-        {/* Reference Assets */}
+        {/* End Frame */}
         <div className="space-y-1">
-          <label className="text-[10px] text-[#555] uppercase tracking-wider">레퍼런스 에셋</label>
-          <div className="space-y-1">
-            {projectAssets.map((a) => {
-              const checked = activeShot.referenceAssetIds.includes(a.id);
-              return (
-                <label key={a.id} className="flex items-center gap-2 cursor-pointer group">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => {
-                      const next = checked
-                        ? activeShot.referenceAssetIds.filter((id) => id !== a.id)
-                        : [...activeShot.referenceAssetIds, a.id];
-                      void updateShot(activeShot.id, { referenceAssetIds: next });
-                    }}
-                    className="accent-blue-500"
-                  />
-                  <span className="text-xs text-[#aaa] group-hover:text-white truncate">{a.name}</span>
-                </label>
-              );
-            })}
-            {projectAssets.length === 0 && (
-              <div className="text-[10px] text-[#444]">에셋 라이브러리에 파일을 추가하세요</div>
-            )}
-          </div>
+          <label className="text-[10px] text-[#555] uppercase tracking-wider">끝 프레임</label>
+          <select
+            value={activeShot.endFrameAssetId ?? ""}
+            onChange={(e) =>
+              void updateShot(activeShot.id, {
+                endFrameAssetId: e.target.value || undefined,
+              })
+            }
+            className="w-full bg-[#111] border border-[#222] rounded px-2 py-1.5 text-xs text-[#ccc] outline-none focus:border-[#333]"
+          >
+            <option value="">없음</option>
+            {imageAssets.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
         </div>
 
         {/* Seed */}
@@ -303,7 +298,7 @@ export function Inspector({ projectId }: InspectorProps) {
                     />
                   </div>
                   <div className="text-[10px] text-[#555]">
-                    {stageLabel(latestGen.progress)}
+                    {stageLabel(latestGen.stage, latestGen.progress)}
                   </div>
                 </div>
               )}

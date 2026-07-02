@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import type {
   VideoGenerationProvider,
   VideoGenerationInput,
@@ -219,8 +220,8 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       throw koError("IMAGE_REQUIRED");
     }
 
-    const imageName = await this._uploadImage(input.startFrameData);
-    const workflow = this._patchWorkflow(this.workflowJson, input, imageName);
+    const upload = await this._uploadImage(input.startFrameData);
+    const workflow = this._patchWorkflow(this.workflowJson, input, upload.imageName);
 
     let res: Response;
     try {
@@ -263,6 +264,16 @@ export class ComfyUIProvider implements VideoGenerationProvider {
 
     // Register the job with the tracker so WebSocket events are tracked from now on.
     this._tracker.registerJob(data.prompt_id);
+
+    if (process.env.NODE_ENV === "development") {
+      console.debug("[ComfyUI] upload:", {
+        uploadFilename: upload.uploadFilename,
+        responseName: upload.responseName,
+        subfolder: upload.subfolder,
+        node78: upload.imageName,
+        promptId: data.prompt_id,
+      });
+    }
 
     return { providerJobId: data.prompt_id };
   }
@@ -308,6 +319,7 @@ export class ComfyUIProvider implements VideoGenerationProvider {
         providerJobId,
         status: "queued",
         progress: ws?.progress ?? 8,
+        stage: ws?.stage ?? "queued",
       };
     }
 
@@ -336,11 +348,12 @@ export class ComfyUIProvider implements VideoGenerationProvider {
           providerJobId,
           status: "failed",
           progress: 100,
+          stage: "completed",
           errorCode: "OUTPUT_NOT_FOUND",
           errorMessage: KO.OUTPUT_NOT_FOUND,
         };
       }
-      return { providerJobId, status: "completed", progress: 100, outputUrl };
+      return { providerJobId, status: "completed", progress: 100, stage: "completed", outputUrl };
     }
 
     // In progress — prefer WebSocket tracker for real granularity
@@ -349,6 +362,7 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       providerJobId,
       status: "processing",
       progress: ws?.progress ?? 12,
+      stage: ws?.stage ?? "preparing",
     };
   }
 
@@ -370,28 +384,32 @@ export class ComfyUIProvider implements VideoGenerationProvider {
 
   // ─── Internal methods ─────────────────────────────────────────────────────
 
-  private async _uploadImage(startFrameData: string): Promise<string> {
+  private async _uploadImage(
+    startFrameData: string
+  ): Promise<{ imageName: string; uploadFilename: string; responseName: string; subfolder: string }> {
     let blob: Blob;
-    let filename: string;
+    let ext: string;
 
     if (startFrameData.startsWith("data:")) {
       const commaIdx = startFrameData.indexOf(",");
       const header = startFrameData.slice(0, commaIdx);
       const base64 = startFrameData.slice(commaIdx + 1);
       const mime = header.match(/:(.*?);/)?.[1] ?? "image/png";
-      const ext = mime.split("/")[1] ?? "png";
+      ext = mime.split("/")[1] ?? "png";
       const bytes = Buffer.from(base64, "base64");
       blob = new Blob([bytes], { type: mime });
-      filename = `ltx-upload.${ext}`;
     } else {
       // Assume raw base64 PNG
       const bytes = Buffer.from(startFrameData, "base64");
       blob = new Blob([bytes], { type: "image/png" });
-      filename = "ltx-upload.png";
+      ext = "png";
     }
 
+    // Unique filename per upload to avoid ComfyUI caching stale images
+    const uploadFilename = `ltx-studio/${randomUUID()}.${ext}`;
+
     const form = new FormData();
-    form.append("image", blob, filename);
+    form.append("image", blob, uploadFilename);
     form.append("type", "input");
     form.append("overwrite", "true");
 
@@ -416,8 +434,10 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       name: string;
       subfolder?: string;
     };
-    const { name, subfolder } = uploadData;
-    return subfolder ? `${subfolder}/${name}` : name;
+    const { name, subfolder = "" } = uploadData;
+    const imageName = subfolder ? `${subfolder}/${name}` : name;
+
+    return { imageName, uploadFilename, responseName: name, subfolder };
   }
 
   /** Exposed without `private` so unit tests can call it directly. */

@@ -215,7 +215,7 @@ describe("Generation — startFrameData resolution", () => {
     expect(captured.body?.startFrameData as string).toMatch(/^data:image\/png;base64,/);
   });
 
-  it("auto-promotes first image referenceAssetId when no startFrameAssetId", async () => {
+  it("does NOT auto-promote referenceAssetId when no startFrameAssetId (single-image policy)", async () => {
     const { useAssetStore } = await import("@/lib/store/asset-store");
     const assetStore = useAssetStore.getState();
     const file = new File([new Uint8Array([137, 80, 78, 71])], "ref.png", {
@@ -233,10 +233,11 @@ describe("Generation — startFrameData resolution", () => {
       durationSeconds: 4,
       aspectRatio: "16:9",
       referenceAssetIds: [asset.id],
-      // no startFrameAssetId
+      // no startFrameAssetId — referenceAssetIds are NOT auto-promoted
     });
 
-    expect(captured.body?.startFrameData as string).toMatch(/^data:image\/png;base64,/);
+    // startFrameData should be absent: only explicit startFrameAssetId is resolved
+    expect(captured.body?.startFrameData).toBeUndefined();
   });
 
   it("sends no startFrameData when no image asset is set", async () => {

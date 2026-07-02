@@ -37,6 +37,18 @@ export const GenerationStatusSchema = z.enum([
 ]);
 export type GenerationStatus = z.infer<typeof GenerationStatusSchema>;
 
+export const GenerationStageSchema = z.enum([
+  "uploading",
+  "queued",
+  "preparing",
+  "sampling",
+  "decoding",
+  "encoding",
+  "saving",
+  "completed",
+]);
+export type GenerationStage = z.infer<typeof GenerationStageSchema>;
+
 // ---------------------------------------------------------------------------
 // Project
 // ---------------------------------------------------------------------------
@@ -105,6 +117,7 @@ export const GenerationSchema = z.object({
   providerJobId: z.string().optional(),
   status: GenerationStatusSchema,
   progress: z.number().min(0).max(100),
+  stage: GenerationStageSchema.optional(),
   prompt: z.string(),
   negativePrompt: z.string().optional(),
   seed: z.number().int().optional(),

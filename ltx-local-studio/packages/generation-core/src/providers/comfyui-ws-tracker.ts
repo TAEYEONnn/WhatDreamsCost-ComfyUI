@@ -2,18 +2,17 @@
  * ComfyUIWsTracker — server-side WebSocket listener for ComfyUI progress events.
  *
  * Connects to ws://<host>/ws?clientId=<id>, receives execution events, and maps
- * them to a 0-100 progress scale per promptId. The provider reads these values
- * via getProgress() when answering GET /api/generations/{jobId} polls.
+ * them to a 0-100 progress scale and a GenerationStage per promptId. The provider
+ * reads these values via getProgress() when answering polling requests.
  *
  * Progress never goes backward (Math.max rule). Reconnects with exponential
- * backoff (1 s → 2 s → 4 s … capped at 30 s) so a ComfyUI restart is recovered
- * automatically.
+ * backoff (1 s → 2 s → 4 s … capped at 30 s).
  */
+import type { GenerationStage } from "@ltx-studio/shared-types";
 
 // ─── WsLike interface — subset needed for injection + mocking ─────────────────
 
 export interface WsLike {
-  // Generic overload so mock objects satisfy the interface without full WebSocket types.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(event: string, listener: (...args: any[]) => void): this;
   close(): void;
@@ -25,16 +24,15 @@ export type WsFactory = (url: string) => WsLike;
 
 export interface ProgressState {
   progress: number;
-  stage?: string;
+  stage?: GenerationStage;
   updatedAt: number;
 }
 
 // ─── Node IDs that carry meaningful stage transitions ─────────────────────────
-// Must match the node IDs in ltxv-i2v-0.9.5.json.
 
 const NODE = {
-  SAMPLER: "72",    // SamplerCustom — reports value/max progress ticks
-  VAE_DECODE: "8",  // VAEDecode — post-sampling decode
+  SAMPLER: "72",
+  VAE_DECODE: "8",
   CREATE_VIDEO: "80",
   SAVE_VIDEO: "81",
 } as const;
@@ -58,7 +56,7 @@ export class ComfyUIWsTracker {
 
   private ws: WsLike | null = null;
   private stopping = false;
-  private reconnectDelay = 1_000; // ms, doubles on each failure up to MAX_DELAY
+  private reconnectDelay = 1_000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   private static readonly MAX_DELAY = 30_000;
@@ -90,20 +88,19 @@ export class ComfyUIWsTracker {
   }
 
   /**
-   * Register a job when it's first submitted so the tracker knows to watch for
-   * its events. Sets initial progress to 8% ("submitted to queue").
+   * Register a job after its prompt is submitted to ComfyUI.
+   * Sets initial progress to 8% / stage "queued".
    */
   registerJob(promptId: string): void {
-    this._setProgress(promptId, 8, "생성대기중");
+    this._setProgress(promptId, 8, "queued");
   }
 
   /**
-   * Called by the provider when history confirms the job is completed.
-   * Forces progress to 100 and clears the entry after a short delay.
+   * Called by the provider when history confirms the job completed.
+   * Forces progress to 100 / stage "completed" and cleans up after 60 s.
    */
   markCompleted(promptId: string): void {
-    this._setProgress(promptId, 100, "완료");
-    // Keep state for 60 s so in-flight polls still read 100%
+    this._setProgress(promptId, 100, "completed");
     setTimeout(() => {
       this.progressMap.delete(promptId);
     }, 60_000);
@@ -122,7 +119,6 @@ export class ComfyUIWsTracker {
     try {
       ws = this.wsFactory(this.wsUrl);
     } catch {
-      // Factory failed (e.g. ws package not available)
       this._scheduleReconnect();
       return;
     }
@@ -130,7 +126,6 @@ export class ComfyUIWsTracker {
     this.ws = ws;
 
     ws.on("open", () => {
-      // Reset backoff on successful connection
       this.reconnectDelay = ComfyUIWsTracker.INITIAL_DELAY;
     });
 
@@ -144,7 +139,7 @@ export class ComfyUIWsTracker {
     });
 
     ws.on("error", () => {
-      // Error is always followed by close; we reconnect there
+      // Error is always followed by close; reconnect there
     });
 
     ws.on("close", () => {
@@ -170,37 +165,33 @@ export class ComfyUIWsTracker {
 
     switch (event.type) {
       case "execution_start":
-        // promptId starts executing (dequeued from pending)
         if (event.data?.prompt_id) {
-          this._setProgress(event.data.prompt_id, 12, "모델준비중");
+          this._setProgress(event.data.prompt_id, 12, "preparing");
         }
         break;
 
       case "executing": {
-        // Node is about to start executing
         const promptId = event.data?.prompt_id;
         if (!promptId) break;
 
         switch (event.data?.node) {
-          case null:
-          case undefined:
-            // null node = execution finished, wait for execution_success
+          case NODE.SAMPLER:
+            this._setProgress(promptId, 15, "sampling");
             break;
           case NODE.VAE_DECODE:
-            this._setProgress(promptId, 93, "영상디코딩중");
+            this._setProgress(promptId, 93, "decoding");
             break;
           case NODE.CREATE_VIDEO:
-            this._setProgress(promptId, 96, "영상디코딩중");
+            this._setProgress(promptId, 96, "encoding");
             break;
           case NODE.SAVE_VIDEO:
-            this._setProgress(promptId, 98, "영상파일저장중");
+            this._setProgress(promptId, 98, "saving");
             break;
         }
         break;
       }
 
       case "progress": {
-        // Sampler step tick — only meaningful for the sampler node
         const promptId = event.data?.prompt_id;
         if (!promptId) break;
         if (event.data?.node !== NODE.SAMPLER) break;
@@ -208,32 +199,29 @@ export class ComfyUIWsTracker {
         const value = event.data.value ?? 0;
         const max = event.data.max ?? 1;
         const ratio = max > 0 ? value / max : 0;
-        // Map sampler steps to 15–90%
         const pct = Math.round(15 + ratio * 75);
         const clamped = Math.min(Math.max(pct, 15), 90);
-        this._setProgress(promptId, clamped, "영상프레임생성중");
+        this._setProgress(promptId, clamped, "sampling");
         break;
       }
 
       case "execution_success": {
         const promptId = event.data?.prompt_id;
         if (promptId) {
-          this._setProgress(promptId, 100, "완료");
+          this._setProgress(promptId, 100, "completed");
         }
         break;
       }
 
-      case "execution_error": {
-        // Don't update progress — let the HTTP history poll surface the error
+      case "execution_error":
+        // Don't update — let HTTP history poll surface the error
         break;
-      }
     }
   }
 
   // ─── Progress helpers ─────────────────────────────────────────────────────────
 
-  /** Updates progress, enforcing the no-backward rule. */
-  private _setProgress(promptId: string, pct: number, stage?: string): void {
+  private _setProgress(promptId: string, pct: number, stage?: GenerationStage): void {
     const prev = this.progressMap.get(promptId);
     const next = Math.min(Math.max(pct, 0), 100);
     if (prev && prev.progress >= next) return; // never go backward

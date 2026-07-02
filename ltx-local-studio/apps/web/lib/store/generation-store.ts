@@ -134,15 +134,8 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
       }
 
       // Fallback: use first image in referenceAssetIds if no explicit start frame
-      if (!startFrameData && input.referenceAssetIds?.length) {
-        for (const refId of input.referenceAssetIds) {
-          const resolved = await resolveAssetToDataUrl(refId);
-          if (resolved) {
-            startFrameData = resolved;
-            break;
-          }
-        }
-      }
+      // Note: referenceAssetIds are NOT auto-promoted to startFrameData.
+      // The UI enforces a single explicit start image via startFrameAssetId.
 
       const res = await fetch("/api/generations", {
         method: "POST",
@@ -225,6 +218,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
         const result = (await res.json()) as {
           status: GenerationStatus;
           progress: number;
+          stage?: Generation["stage"];
           outputUrl?: string;
           errorCode?: string;
           errorMessage?: string;
@@ -232,6 +226,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
         const changes: Partial<Generation> = {
           status: result.status,
           progress: result.progress,
+          stage: result.stage,
           errorCode: result.errorCode,
           errorMessage: result.errorMessage,
         };
