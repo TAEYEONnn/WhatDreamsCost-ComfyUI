@@ -6,7 +6,6 @@ import workflowJson from "./workflows/ltxv-i2v-0.9.5.json";
 // Next.js hot-reload in development. Without this, each module re-evaluation
 // would create a new tracker and leave the old one's WS connection open.
 declare global {
-  // eslint-disable-next-line no-var
   var __ltx_server_provider__: VideoGenerationProvider | undefined;
 }
 

@@ -234,6 +234,15 @@ describe("ComfyUIProvider._patchWorkflow", () => {
     provider._patchWorkflow(WORKFLOW, BASE_INPUT, "img.png");
     expect(JSON.stringify(WORKFLOW)).toBe(before);
   });
+
+  it("throws WORKFLOW_IMAGE_NOT_WIRED when node 77 image is not linked to node 78", () => {
+    // Broken workflow: node 77's image points to a non-existent or wrong node
+    const brokenWorkflow = JSON.parse(JSON.stringify(WORKFLOW)) as Record<string, unknown>;
+    (brokenWorkflow["77"] as { inputs: Record<string, unknown> }).inputs.image = ["99", 0];
+    expect(() =>
+      provider._patchWorkflow(brokenWorkflow, BASE_INPUT, "img.png")
+    ).toThrow("시작 이미지가 적용되지 않았습니다");
+  });
 });
 
 // ─── submitGeneration ─────────────────────────────────────────────────────────
@@ -310,8 +319,9 @@ describe("ComfyUIProvider.submitGeneration", () => {
     expect(wf["7"].inputs.text).not.toBe("POSITIVE_TEXT");
   });
 
-  it("uses a UUID-based unique filename for each upload", async () => {
+  it("uses a UUID-based unique flat filename for each upload (no path prefix in filename)", async () => {
     const uploadedFilenames: string[] = [];
+    const uploadedSubfolders: string[] = [];
 
     globalThis.fetch = vi.fn().mockImplementation(
       async (url: string, opts?: RequestInit) => {
@@ -322,8 +332,11 @@ describe("ComfyUIProvider.submitGeneration", () => {
         if (u.includes("/upload/image")) {
           const form = opts?.body as FormData;
           const file = form.get("image") as File;
+          const subfolder = form.get("subfolder") as string ?? "";
           uploadedFilenames.push(file.name);
-          return { ok: true, json: async () => ({ name: "out.png", subfolder: "" }) };
+          uploadedSubfolders.push(subfolder);
+          // Return the same subfolder so imageName is correctly built
+          return { ok: true, json: async () => ({ name: file.name, subfolder }) };
         }
         if (u.endsWith("/prompt")) {
           return { ok: true, json: async () => ({ prompt_id: "ok-uuid" }) };
@@ -338,7 +351,38 @@ describe("ComfyUIProvider.submitGeneration", () => {
 
     expect(uploadedFilenames).toHaveLength(2);
     expect(uploadedFilenames[0]).not.toBe(uploadedFilenames[1]); // unique per request
-    expect(uploadedFilenames[0]).toMatch(/^ltx-studio\/[0-9a-f-]{36}\.png$/);
+    // Filename is a flat UUID — no path separator (subfolder is sent separately)
+    expect(uploadedFilenames[0]).toMatch(/^[0-9a-f-]{36}\.png$/);
+    expect(uploadedFilenames[0]).not.toContain("/");
+    // Subfolder is always "ltx-studio"
+    expect(uploadedSubfolders[0]).toBe("ltx-studio");
+    expect(uploadedSubfolders[1]).toBe("ltx-studio");
+  });
+
+  it("sends overwrite=false in the upload FormData", async () => {
+    let overwriteValue: string | null = null;
+
+    globalThis.fetch = vi.fn().mockImplementation(
+      async (url: string, opts?: RequestInit) => {
+        const u = url as string;
+        if (u.endsWith("/system_stats")) {
+          return { ok: true, json: async () => ({ system: {} }) };
+        }
+        if (u.includes("/upload/image")) {
+          const form = opts?.body as FormData;
+          overwriteValue = form.get("overwrite") as string;
+          return { ok: true, json: async () => ({ name: "f.png", subfolder: "ltx-studio" }) };
+        }
+        if (u.endsWith("/prompt")) {
+          return { ok: true, json: async () => ({ prompt_id: "ok-overwrite" }) };
+        }
+        throw new Error(`Unexpected: ${u}`);
+      }
+    ) as typeof fetch;
+
+    const provider = makeProvider();
+    await provider.submitGeneration(BASE_INPUT);
+    expect(overwriteValue).toBe("false");
   });
 
   it("combines subfolder and name for node 78 when subfolder is non-empty", async () => {

@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useShotStore } from "@/lib/store/shot-store";
 import { useGenerationStore } from "@/lib/store/generation-store";
 import { useAssetStore } from "@/lib/store/asset-store";
@@ -47,14 +47,117 @@ function stageLabel(stage: GenerationStage | undefined, progress: number): strin
   return stageLabelFromProgress(progress);
 }
 
+const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
+
 export function Inspector({ projectId }: InspectorProps) {
   const { shots, activeShotId, updateShot } = useShotStore();
   const { generations, loadGenerations, submitGeneration, cancelGeneration, retryGeneration } =
     useGenerationStore();
-  const { assets } = useAssetStore();
+  const { uploadAsset, getBlobUrl } = useAssetStore();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+
+  // Local image state — preview URL (object URL) and the asset that backs it
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const imagePreviewRef = useRef<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const activeShot = shots.find((s) => s.id === activeShotId);
+
+  // Restore preview from persisted startFrameAssetId on shot/project change
+  useEffect(() => {
+    const assetId = activeShot?.startFrameAssetId;
+    let cancelled = false;
+    const prev = imagePreviewRef.current;
+
+    const restore = async () => {
+      if (prev) {
+        URL.revokeObjectURL(prev);
+        imagePreviewRef.current = null;
+      }
+      if (!assetId) {
+        setImagePreview(null);
+        return;
+      }
+      const url = await getBlobUrl(assetId);
+      if (!cancelled && url) {
+        imagePreviewRef.current = url;
+        setImagePreview(url);
+      }
+    };
+
+    void restore();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeShot?.startFrameAssetId, activeShot?.id, getBlobUrl]);
+
+  // Cleanup object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (imagePreviewRef.current) {
+        URL.revokeObjectURL(imagePreviewRef.current);
+      }
+    };
+  }, []);
+
+  const handleImageFile = useCallback(
+    async (file: File) => {
+      if (!projectId || !activeShot) return;
+      setImageError(null);
+
+      if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+        setImageError("PNG, JPG, WEBP 이미지만 사용할 수 있습니다.");
+        return;
+      }
+
+      // Revoke old preview
+      if (imagePreviewRef.current) {
+        URL.revokeObjectURL(imagePreviewRef.current);
+        imagePreviewRef.current = null;
+      }
+
+      // Show preview immediately
+      const previewUrl = URL.createObjectURL(file);
+      imagePreviewRef.current = previewUrl;
+      setImagePreview(previewUrl);
+
+      // Upload to asset store (for IndexedDB persistence) → get assetId
+      try {
+        const asset = await uploadAsset(projectId, file, "reference");
+        await updateShot(activeShot.id, { startFrameAssetId: asset.id });
+      } catch {
+        setImageError("이미지 저장에 실패했습니다.");
+      }
+
+      // Reset input so the same file can be reselected
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    },
+    [projectId, activeShot, uploadAsset, updateShot]
+  );
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) void handleImageFile(file);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file) void handleImageFile(file);
+  };
+
+  const clearImage = async () => {
+    if (!activeShot) return;
+    if (imagePreviewRef.current) {
+      URL.revokeObjectURL(imagePreviewRef.current);
+      imagePreviewRef.current = null;
+    }
+    setImagePreview(null);
+    setImageError(null);
+    await updateShot(activeShot.id, { startFrameAssetId: undefined });
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
 
   if (!projectId || !activeShot) {
     return (
@@ -67,8 +170,7 @@ export function Inspector({ projectId }: InspectorProps) {
   const shotGenerations = generations.filter((g) => g.shotId === activeShot.id);
   const latestGen = shotGenerations[0];
 
-  const projectAssets = assets.filter((a) => a.projectId === projectId);
-  const imageAssets = projectAssets.filter((a) => a.kind === "image");
+  const hasStartImage = !!activeShot.startFrameAssetId;
 
   const handleGenerate = async () => {
     setIsSubmitting(true);
@@ -81,8 +183,8 @@ export function Inspector({ projectId }: InspectorProps) {
 
       await submitGeneration({
         shotId: activeShot.id,
-        providerId: "mock",
-        modelId: "mock-ltxv-0.9",
+        providerId: "comfyui",
+        modelId: "ltxv-0.9.5",
         prompt: finalPrompt,
         negativePrompt: activeShot.negativePrompt,
         durationSeconds: activeShot.durationSeconds,
@@ -186,52 +288,73 @@ export function Inspector({ projectId }: InspectorProps) {
           </select>
         </div>
 
-        {/* 시작 이미지 — single image only for LTX 0.9.5 */}
+        {/* 시작 이미지 — direct file upload, single image only */}
         <div className="space-y-1">
-          <label className="text-[10px] text-[#555] uppercase tracking-wider">시작 이미지</label>
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] text-[#555] uppercase tracking-wider">시작 이미지</label>
+            {hasStartImage && (
+              <button
+                onClick={() => void clearImage()}
+                className="text-[10px] text-[#555] hover:text-red-400 transition-colors"
+              >
+                제거
+              </button>
+            )}
+          </div>
           <p className="text-[10px] text-[#444]">
             현재 로컬 LTX 모델은 시작 이미지 1장만 사용할 수 있습니다.
           </p>
-          <select
-            value={activeShot.startFrameAssetId ?? ""}
-            onChange={(e) =>
-              void updateShot(activeShot.id, {
-                startFrameAssetId: e.target.value || undefined,
-              })
-            }
-            className="w-full bg-[#111] border border-[#222] rounded px-2 py-1.5 text-xs text-[#ccc] outline-none focus:border-[#333]"
+
+          {/* Hidden file input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            onChange={handleFileChange}
+          />
+
+          {/* Drop zone / preview */}
+          <div
+            role="button"
+            tabIndex={0}
+            className={`relative w-full rounded border-2 border-dashed transition-colors cursor-pointer
+              ${hasStartImage
+                ? "border-[#333] bg-[#111]"
+                : "border-[#222] bg-[#0d0d0d] hover:border-[#333] hover:bg-[#111]"
+              }`}
+            style={{ minHeight: "80px" }}
+            onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
+            onDrop={handleDrop}
+            onDragOver={(e) => e.preventDefault()}
           >
-            <option value="">없음</option>
-            {imageAssets.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-          {imageAssets.length === 0 && (
-            <div className="text-[10px] text-[#444]">에셋 라이브러리에 이미지를 추가하세요</div>
+            {imagePreview ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={imagePreview}
+                alt="시작 이미지"
+                className="w-full h-full object-contain rounded"
+                style={{ maxHeight: "120px" }}
+              />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-20 gap-1">
+                <span className="text-[#333] text-lg">+</span>
+                <span className="text-[10px] text-[#444]">클릭하거나 드래그</span>
+                <span className="text-[10px] text-[#333]">PNG · JPG · WEBP</span>
+              </div>
+            )}
+          </div>
+
+          {imageError && (
+            <div className="text-[10px] text-red-400">{imageError}</div>
           )}
         </div>
 
         {/* End Frame */}
         <div className="space-y-1">
           <label className="text-[10px] text-[#555] uppercase tracking-wider">끝 프레임</label>
-          <select
-            value={activeShot.endFrameAssetId ?? ""}
-            onChange={(e) =>
-              void updateShot(activeShot.id, {
-                endFrameAssetId: e.target.value || undefined,
-              })
-            }
-            className="w-full bg-[#111] border border-[#222] rounded px-2 py-1.5 text-xs text-[#ccc] outline-none focus:border-[#333]"
-          >
-            <option value="">없음</option>
-            {imageAssets.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
+          <p className="text-[10px] text-[#444]">추후 지원 예정</p>
         </div>
 
         {/* Seed */}
@@ -261,10 +384,10 @@ export function Inspector({ projectId }: InspectorProps) {
         ) : (
           <button
             onClick={() => void handleGenerate()}
-            disabled={isSubmitting || !activeShot.prompt}
+            disabled={isSubmitting || !activeShot.prompt || !hasStartImage}
             className="w-full py-2 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-medium text-white transition-colors"
           >
-            {isSubmitting ? "생성 요청 중..." : "영상 생성"}
+            {isSubmitting ? "생성 요청 중..." : !hasStartImage ? "시작 이미지를 선택하세요" : "영상 생성"}
           </button>
         )}
 
@@ -297,7 +420,7 @@ export function Inspector({ projectId }: InspectorProps) {
                       style={{ width: `${latestGen.progress}%` }}
                     />
                   </div>
-                  <div className="text-[10px] text-[#555]">
+                  <div className="text-[10px] text-[#666]">
                     {stageLabel(latestGen.stage, latestGen.progress)}
                   </div>
                 </div>

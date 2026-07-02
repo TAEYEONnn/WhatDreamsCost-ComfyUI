@@ -266,10 +266,7 @@ export class ComfyUIProvider implements VideoGenerationProvider {
     this._tracker.registerJob(data.prompt_id);
 
     if (process.env.NODE_ENV === "development") {
-      console.debug("[ComfyUI] upload:", {
-        uploadFilename: upload.uploadFilename,
-        responseName: upload.responseName,
-        subfolder: upload.subfolder,
+      console.debug("[ComfyUI I2V] prompt submitted", {
         node78: upload.imageName,
         promptId: data.prompt_id,
       });
@@ -390,12 +387,19 @@ export class ComfyUIProvider implements VideoGenerationProvider {
     let blob: Blob;
     let ext: string;
 
+    // MIME → file extension table (jpeg must map to jpg, not jpeg)
+    const MIME_EXT: Record<string, string> = {
+      "image/png":  "png",
+      "image/jpeg": "jpg",
+      "image/webp": "webp",
+    };
+
     if (startFrameData.startsWith("data:")) {
       const commaIdx = startFrameData.indexOf(",");
       const header = startFrameData.slice(0, commaIdx);
       const base64 = startFrameData.slice(commaIdx + 1);
       const mime = header.match(/:(.*?);/)?.[1] ?? "image/png";
-      ext = mime.split("/")[1] ?? "png";
+      ext = MIME_EXT[mime] ?? mime.split("/")[1] ?? "png";
       const bytes = Buffer.from(base64, "base64");
       blob = new Blob([bytes], { type: mime });
     } else {
@@ -405,13 +409,18 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       ext = "png";
     }
 
-    // Unique filename per upload to avoid ComfyUI caching stale images
-    const uploadFilename = `ltx-studio/${randomUUID()}.${ext}`;
+    // Unique flat filename + explicit subfolder field.
+    // ComfyUI applies os.path.basename() to the filename argument for security,
+    // so embedding the subfolder in the filename would strip it.  Instead we
+    // send subfolder as its own form field so ComfyUI creates the directory.
+    const uploadFilename = `${randomUUID()}.${ext}`;
+    const SUBFOLDER = "ltx-studio";
 
     const form = new FormData();
     form.append("image", blob, uploadFilename);
     form.append("type", "input");
-    form.append("overwrite", "true");
+    form.append("subfolder", SUBFOLDER);
+    form.append("overwrite", "false"); // UUIDs are unique; never overwrite
 
     let uploadRes: Response;
     try {
@@ -435,7 +444,19 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       subfolder?: string;
     };
     const { name, subfolder = "" } = uploadData;
+    // Build the image path as ComfyUI's LoadImage node expects it.
+    // When a subfolder is returned, the path is "subfolder/name".
     const imageName = subfolder ? `${subfolder}/${name}` : name;
+
+    if (process.env.NODE_ENV === "development") {
+      console.debug("[ComfyUI I2V] upload", {
+        mimeType: blob.type,
+        uploadName: uploadFilename,
+        comfyName: name,
+        subfolder,
+        workflowImage: imageName,
+      });
+    }
 
     return { imageName, uploadFilename, responseName: name, subfolder };
   }
@@ -479,8 +500,22 @@ export class ComfyUIProvider implements VideoGenerationProvider {
       node(N.IMG_TO_VIDEO).strength = i2vStrength;
     }
 
-    // Node 78 — LoadImage: uploaded filename
+    // Node 78 — LoadImage: uploaded filename (never fall back to workflow default)
     node(N.LOAD_IMAGE).image = imageName;
+
+    // Verify node 77 is wired to node 78 — safety check against workflow drift
+    const n77 = patched[N.IMG_TO_VIDEO]?.inputs as Record<string, unknown> | undefined;
+    const imageLink = n77?.image;
+    const isWired =
+      Array.isArray(imageLink) &&
+      imageLink[0] === N.LOAD_IMAGE &&
+      imageLink[1] === 0;
+    if (!isWired) {
+      throw new GenerationError(
+        "ComfyUI Workflow에 시작 이미지가 적용되지 않았습니다.",
+        "WORKFLOW_IMAGE_NOT_WIRED"
+      );
+    }
 
     // Node 69 — Conditioning fps (preserve validated value)
     node(N.CONDITIONING).frame_rate = CONDITIONING_FPS;
