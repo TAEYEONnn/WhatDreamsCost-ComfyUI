@@ -172,3 +172,110 @@ describe("Generation operations", () => {
     expect(providerStatus.checking).toBe(false);
   });
 });
+
+describe("Generation — startFrameData resolution", () => {
+  // Helper: capture the POST body sent to /api/generations
+  function captureGenerationPost(): { body: Record<string, unknown> | undefined } {
+    const captured: { body: Record<string, unknown> | undefined } = { body: undefined };
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/api/providers/status")) {
+        return { ok: true, json: async () => ({ providerId: "comfyui", providerName: "ComfyUI", connected: true }) };
+      }
+      if (u.includes("/api/generations")) {
+        captured.body = JSON.parse((opts?.body as string) ?? "{}") as Record<string, unknown>;
+        return { ok: true, json: async () => ({ providerJobId: "job-ok" }) };
+      }
+      return { ok: false, json: async () => ({ error: "not found" }) };
+    });
+    return captured;
+  }
+
+  it("resolves startFrameAssetId to data: URL in POST body", async () => {
+    const { useAssetStore } = await import("@/lib/store/asset-store");
+    const assetStore = useAssetStore.getState();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "frame.png", {
+      type: "image/png",
+    });
+    const asset = await assetStore.uploadAsset("project-1", file, "reference");
+
+    const captured = captureGenerationPost();
+    const { useGenerationStore } = await import("@/lib/store/generation-store");
+    await useGenerationStore.getState().submitGeneration({
+      shotId: "shot-1",
+      providerId: "comfyui",
+      modelId: "ltxv-0.9.5",
+      prompt: "test",
+      durationSeconds: 4,
+      aspectRatio: "16:9",
+      startFrameAssetId: asset.id,
+    });
+
+    expect(typeof captured.body?.startFrameData).toBe("string");
+    expect(captured.body?.startFrameData as string).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it("auto-promotes first image referenceAssetId when no startFrameAssetId", async () => {
+    const { useAssetStore } = await import("@/lib/store/asset-store");
+    const assetStore = useAssetStore.getState();
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "ref.png", {
+      type: "image/png",
+    });
+    const asset = await assetStore.uploadAsset("project-2", file, "reference");
+
+    const captured = captureGenerationPost();
+    const { useGenerationStore } = await import("@/lib/store/generation-store");
+    await useGenerationStore.getState().submitGeneration({
+      shotId: "shot-2",
+      providerId: "comfyui",
+      modelId: "ltxv-0.9.5",
+      prompt: "fallback test",
+      durationSeconds: 4,
+      aspectRatio: "16:9",
+      referenceAssetIds: [asset.id],
+      // no startFrameAssetId
+    });
+
+    expect(captured.body?.startFrameData as string).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it("sends no startFrameData when no image asset is set", async () => {
+    const captured = captureGenerationPost();
+    const { useGenerationStore } = await import("@/lib/store/generation-store");
+    await useGenerationStore.getState().submitGeneration({
+      shotId: "shot-3",
+      providerId: "comfyui",
+      modelId: "ltxv-0.9.5",
+      prompt: "no image",
+      durationSeconds: 4,
+      aspectRatio: "16:9",
+    });
+
+    // startFrameData should be absent (not a blob URL, not a string)
+    expect(captured.body?.startFrameData).toBeUndefined();
+  });
+
+  it("does not promote a non-image referenceAssetId to startFrameData", async () => {
+    const { useAssetStore } = await import("@/lib/store/asset-store");
+    const assetStore = useAssetStore.getState();
+    const videoFile = new File([new Uint8Array([0, 0, 0])], "clip.mp4", {
+      type: "video/mp4",
+    });
+    const videoAsset = await assetStore.uploadAsset("project-3", videoFile, "reference");
+
+    const captured = captureGenerationPost();
+    const { useGenerationStore } = await import("@/lib/store/generation-store");
+    await useGenerationStore.getState().submitGeneration({
+      shotId: "shot-4",
+      providerId: "comfyui",
+      modelId: "ltxv-0.9.5",
+      prompt: "video ref test",
+      durationSeconds: 4,
+      aspectRatio: "16:9",
+      referenceAssetIds: [videoAsset.id],
+    });
+
+    // Video blob should NOT be promoted to startFrameData
+    expect(captured.body?.startFrameData).toBeUndefined();
+  });
+});

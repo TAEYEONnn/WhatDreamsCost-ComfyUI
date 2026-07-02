@@ -3,6 +3,35 @@ import { v4 as uuidv4 } from "uuid";
 import type { Generation, GenerationStatus } from "@ltx-studio/shared-types";
 import { getDb } from "../db";
 
+/**
+ * Converts a Blob/File to a data URL (data:mime;base64,...).
+ * Uses arrayBuffer() + btoa so it works in browsers and jsdom tests alike.
+ */
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...Array.from(bytes.subarray(i, i + CHUNK)));
+  }
+  return `data:${blob.type || "image/png"};base64,${btoa(binary)}`;
+}
+
+/**
+ * Resolves an asset ID to a base64 data URL by reading its blob from IndexedDB.
+ * Returns undefined if the asset does not exist or is not an image.
+ */
+async function resolveAssetToDataUrl(
+  assetId: string
+): Promise<string | undefined> {
+  const db = getDb();
+  const entry = await db.assetBlobs.get(assetId);
+  if (!entry?.blob) return undefined;
+  if (!entry.blob.type.startsWith("image/")) return undefined;
+  return blobToDataUrl(entry.blob);
+}
+
 interface ProviderStatus {
   providerId: string;
   providerName: string;
@@ -95,10 +124,34 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
     set((s) => ({ generations: [generation, ...s.generations] }));
 
     try {
+      // Resolve the start frame image to a base64 data URL before sending to
+      // the server. The server-side ComfyUI provider needs an actual data URL,
+      // not a UUID or a blob: URL that only exists in this browser tab.
+      let startFrameData: string | undefined;
+
+      if (input.startFrameAssetId) {
+        startFrameData = await resolveAssetToDataUrl(input.startFrameAssetId);
+      }
+
+      // Fallback: use first image in referenceAssetIds if no explicit start frame
+      if (!startFrameData && input.referenceAssetIds?.length) {
+        for (const refId of input.referenceAssetIds) {
+          const resolved = await resolveAssetToDataUrl(refId);
+          if (resolved) {
+            startFrameData = resolved;
+            break;
+          }
+        }
+      }
+
       const res = await fetch("/api/generations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...input, generationId: generation.id }),
+        body: JSON.stringify({
+          ...input,
+          generationId: generation.id,
+          ...(startFrameData ? { startFrameData } : {}),
+        }),
       });
       if (!res.ok) {
         const err = (await res.json()) as { error?: string };
